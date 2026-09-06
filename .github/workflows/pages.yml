@@ -41,9 +41,18 @@ jobs:
         with:
           workspaces: |
             .
-            guests/dominator
+            guests/web-sys
       - run: just components
       - run: just site
+      # gh-pages branch may not exist yet on the very first run —
+      # continue-on-error, and the copy step below no-ops via `2>/dev/null`
+      # if the checkout produced nothing.
+      - uses: actions/checkout@v7
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: gh-pages-data
+      - run: cp -r gh-pages-data/bench dist/bench 2>/dev/null || true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

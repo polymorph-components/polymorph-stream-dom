@@ -25,6 +25,7 @@ members = [
   "shims/wasm-bindgen-futures",
   "fakedom",
   "dominator-todomvc",
+  "dominator-bench",
 ]
 
 [workspace.package]

@@ -21,7 +21,7 @@
     "strict": true
   },
   "tasks": {
-    "check": "deno check receiver/src receiver/tests web/build.ts web/translate.ts web/entry.ts web/e2e",
+    "check": "deno check receiver/src receiver/tests web/build.ts web/translate.ts web/entry.ts web/bench.ts web/e2e bench/tachometer.ts bench/run.ts bench/wire.ts",
     "test": "deno test --allow-read=. receiver/tests/"
   }
 }

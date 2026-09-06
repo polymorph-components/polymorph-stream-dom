@@ -1,0 +1,92 @@
+{
+  "dioxus-bench/create-1k": {
+    "frames": 16007,
+    "bytes": 180574,
+    "batches": 1
+  },
+  "dioxus-bench/replace-1k": {
+    "frames": 17000,
+    "bytes": 189094,
+    "batches": 1
+  },
+  "dioxus-bench/create-10k": {
+    "frames": 160007,
+    "bytes": 1995763,
+    "batches": 1
+  },
+  "dioxus-bench/append-1k": {
+    "frames": 16001,
+    "bytes": 185122,
+    "batches": 1
+  },
+  "dioxus-bench/update-every-10th": {
+    "frames": 101,
+    "bytes": 2987,
+    "batches": 1
+  },
+  "dioxus-bench/select-row": {
+    "frames": 1,
+    "bytes": 19,
+    "batches": 1
+  },
+  "dioxus-bench/swap-rows": {
+    "frames": 2,
+    "bytes": 19,
+    "batches": 1
+  },
+  "dioxus-bench/remove-row": {
+    "frames": 2,
+    "bytes": 17,
+    "batches": 1
+  },
+  "dioxus-bench/clear": {
+    "frames": 10003,
+    "bytes": 67672,
+    "batches": 1
+  },
+  "dominator-bench/create-1k": {
+    "frames": 26005,
+    "bytes": 285412,
+    "batches": 2
+  },
+  "dominator-bench/replace-1k": {
+    "frames": 29000,
+    "bytes": 328266,
+    "batches": 2
+  },
+  "dominator-bench/create-10k": {
+    "frames": 260005,
+    "bytes": 3155239,
+    "batches": 2
+  },
+  "dominator-bench/append-1k": {
+    "frames": 26001,
+    "bytes": 294312,
+    "batches": 2
+  },
+  "dominator-bench/update-every-10th": {
+    "frames": 101,
+    "bytes": 2987,
+    "batches": 1
+  },
+  "dominator-bench/select-row": {
+    "frames": 1,
+    "bytes": 19,
+    "batches": 1
+  },
+  "dominator-bench/swap-rows": {
+    "frames": 2,
+    "bytes": 22,
+    "batches": 1
+  },
+  "dominator-bench/remove-row": {
+    "frames": 4,
+    "bytes": 43,
+    "batches": 1
+  },
+  "dominator-bench/clear": {
+    "frames": 30001,
+    "bytes": 364521,
+    "batches": 1
+  }
+}

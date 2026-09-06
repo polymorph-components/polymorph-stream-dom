@@ -16,9 +16,9 @@ test:
     cargo test --manifest-path guests/web-sys/Cargo.toml --workspace
     deno task test
 
-# Build both demo components into build/ and translate them at build time
-# (the demos ship no translator).
-components: (component "dioxus-todomvc" "Cargo.toml" "dioxus_todomvc") (component "dominator-todomvc" "guests/web-sys/Cargo.toml" "dominator_todomvc")
+# Build all demo + bench components into build/ and translate them at
+# build time (the demos ship no translator).
+components: (component "dioxus-todomvc" "Cargo.toml" "dioxus_todomvc") (component "dominator-todomvc" "guests/web-sys/Cargo.toml" "dominator_todomvc") (component "dioxus-bench" "Cargo.toml" "dioxus_bench") (component "dominator-bench" "guests/web-sys/Cargo.toml" "dominator_bench")
 
 component name manifest artifact:
     #!/usr/bin/env bash
@@ -41,3 +41,16 @@ site:
 e2e: site
     npx -y playwright@1.58 install chromium
     deno test -A web/e2e/
+
+# Wire-shape regression gate for the bench producers: compares each
+# producer/op's frame/byte/batch counts (native receiver, direct
+# transport) against bench/wire-baseline.json.
+bench-wire: site
+    npx -y playwright@1.58 install chromium
+    deno run -A bench/wire.ts
+
+# Runs the tachometer benchmark matrix against dist/ and writes
+# bench/results/{tachometer,benchmark}.json.
+bench: site
+    npx -y playwright@1.58 install chromium
+    deno run -A bench/run.ts

@@ -40,7 +40,7 @@ jobs:
         with:
           workspaces: |
             .
-            guests/dominator
+            guests/web-sys
       - run: just check
       - run: just test
       - run: just components
@@ -51,3 +51,4 @@ jobs:
       # step is the browser binary only and is a no-op after this.
       - run: npx -y playwright@1.58 install --with-deps chromium
       - run: just e2e
+      - run: just bench-wire

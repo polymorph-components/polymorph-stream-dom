@@ -67,6 +67,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dominator-bench"
+version = "0.1.0"
+dependencies = [
+ "dominator",
+ "futures-signals",
+ "prost",
+ "stream-dom-fakedom",
+ "stream-dom-guest",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "dominator-todomvc"
 version = "0.1.0"
 dependencies = [

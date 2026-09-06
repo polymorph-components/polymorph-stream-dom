@@ -1,0 +1,61 @@
+# Runs the tachometer benchmark matrix and publishes results to the
+# `gh-pages` branch's `bench/` history (dispatch: "bench" track), read by
+# github-action-benchmark's own chart page and by pages.yml's copy into
+# `dist/bench/`.
+name: bench
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DENO_VERSION: "2.9.5"
+  WASM_TOOLS_VERSION: "1.247.0"
+  JUST_VERSION: "1.54.0"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: wasm32-wasip2
+          components: clippy
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@${{ env.JUST_VERSION }},wasm-tools@${{ env.WASM_TOOLS_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            guests/web-sys
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: just components
+      - run: just site
+      - run: deno run -A bench/run.ts --sample-size 25
+      - uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: customSmallerIsBetter
+          output-file-path: bench/results/benchmark.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: bench
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: "150%"
+          fail-on-alert: false
+          comment-on-alert: false

@@ -5,6 +5,7 @@ members = [
   "crates/stream-dom-guest",
   "crates/stream-dom-dioxus",
   "guests/dioxus/todomvc",
+  "guests/dioxus/bench",
 ]
 # The Dominator guest is its own workspace: it `[patch]`es wasm-bindgen,
 # js-sys, web-sys and wasm-bindgen-futures with the fake-DOM shims, and a
