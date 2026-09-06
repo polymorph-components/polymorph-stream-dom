@@ -11,7 +11,11 @@ export type {
   TemplateElement,
   TemplateNode,
 } from "./frames.ts";
-export { RemoteDomTranscoder } from "./remote.ts";
+export { ListenerRegistry } from "./receiver.ts";
+export type { Receiver } from "./receiver.ts";
+export { validateTemplateArena } from "./templates.ts";
+export { createRemoteReceiver, RemoteDomTranscoder } from "./remote.ts";
+export { NativeDomReceiver } from "./native.ts";
 export { encodePayload } from "./events.ts";
 export { DispatchGate } from "./dispatch.ts";
 export { mount } from "./mount.ts";

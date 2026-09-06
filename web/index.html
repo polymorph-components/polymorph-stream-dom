@@ -22,7 +22,8 @@
     <p><a href="./dominator.html">Dominator TodoMVC</a> — the same TodoMVC app,
 this time built with Rust/Dominator.</p>
     <p>Both stream their DOM mutations across the same wire into this page's
-receiver, which replays them into a <a href="https://github.com/Shopify/remote-dom">remote-dom</a>
-<code>DOMRemoteReceiver</code>.</p>
+receiver. Demos default to the native DOM receiver; add <code>?receiver=remote</code>
+to the URL to switch to the <a href="https://github.com/Shopify/remote-dom">remote-dom</a>
+<code>DOMRemoteReceiver</code> instead.</p>
   </body>
 </html>

@@ -2,8 +2,10 @@
 // `deno bundle --platform browser` (web/build.ts). Reads which demo to
 // mount from `data-component` on `#app` (or a `?app=` query override, for
 // the e2e test to probe both demos independent of which HTML shipped
-// them), fetches the component + its build-time translation envelope, and
-// mounts through the receiver (receiver/src/mount.ts).
+// them), and which receiver/transport to use from `?receiver=`/
+// `?transport=` (both optional; `mount`'s own defaults apply when
+// absent), fetches the component + its build-time translation envelope,
+// and mounts through the receiver (receiver/src/mount.ts).
 
 import { artifactsFromEnvelope } from "@polyengine/runtime/embedder";
 import { mount } from "@polymorph/stream-dom-receiver";
@@ -27,6 +29,16 @@ function showError(err: unknown): void {
   }
 }
 
+function queryParam<T extends string>(
+  name: string,
+  allowed: readonly T[],
+): T | undefined {
+  const v = new URLSearchParams(location.search).get(name);
+  return (allowed as readonly string[]).includes(v ?? "")
+    ? (v as T)
+    : undefined;
+}
+
 async function run(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) throw new Error("#app not found");
@@ -40,7 +52,10 @@ async function run(): Promise<void> {
   ]);
   const source = artifactsFromEnvelope(envelope, new Uint8Array(componentBuf));
 
-  await mount({ source, root, onError: showError });
+  const receiver = queryParam("receiver", ["native", "remote"] as const);
+  const transport = queryParam("transport", ["direct", "chunked"] as const);
+
+  await mount({ source, root, onError: showError, receiver, transport });
   globalThis.__streamDom!.mounted = true;
 }
 

@@ -1,7 +1,10 @@
 // Host glue: instantiates a `polymorph:stream-dom` producer component,
-// reads its mutation stream through `RemoteDomTranscoder` into a
-// `DOMRemoteReceiver`, and dispatches DOM events back through
-// `handle-event`. Governing docs: wit/stream-dom.wit (world `producer`),
+// reads its mutation stream into a `Receiver` (either backend — see
+// receiver.ts), and dispatches DOM events back through `handle-event`.
+// Backend-agnostic by construction: everything here goes through the
+// `Receiver` seam (`sink`, `resolveNode`, `listeners`, `onCommit`,
+// `dispose`), never through `RemoteDomTranscoder` or `NativeDomReceiver`
+// by name. Governing docs: wit/stream-dom.wit (world `producer`),
 // docs/design.md "Events" (delegation, declarative flags) and
 // contracts/embedder-api.md "Module wiring and instantiation" / "Streams
 // and futures" (cited inline as `contract:<section>`).
@@ -10,13 +13,14 @@ import { instantiate } from "@polyengine/runtime/embedder";
 import type { InstantiateSource } from "@polyengine/runtime/embedder";
 import type { Stream } from "@polyengine/protocol";
 import { wasi } from "@polyengine/wasi";
-import { DOMRemoteReceiver } from "@remote-dom/core/receivers";
 
 import { DispatchGate } from "./dispatch.ts";
 import { encodePayload } from "./events.ts";
 import { FrameDecoder } from "./frames.ts";
 import type { Listener, ListenerTarget } from "./frames.ts";
-import { RemoteDomTranscoder } from "./remote.ts";
+import { NativeDomReceiver } from "./native.ts";
+import { createRemoteReceiver } from "./remote.ts";
+import type { Receiver } from "./receiver.ts";
 
 export interface MountOptions {
   /** Component artifacts, passed through verbatim to `instantiate`
@@ -26,10 +30,42 @@ export interface MountOptions {
   /** Asynchronous failure after mount: the mutation stream's read session
    * rejecting, or a `handle-event` call rejecting. */
   onError?(err: unknown): void;
+  /** Which DOM backend applies frames (docs/design.md "Spike"): `"native"`
+   * (default) writes straight to real nodes; `"remote"` replays into
+   * Shopify remote-dom's `DOMRemoteReceiver` (the original bring-up
+   * receiver — kept for comparison and for hosts that already speak
+   * remote-dom). */
+  receiver?: "native" | "remote";
+  /** How the mutation stream is read (contract:"Streams and futures"):
+   * `"direct"` (default) uses `stream.readDirect`, decoding straight out
+   * of a view over guest memory with no intermediate copy; `"chunked"`
+   * uses the `stream.read(max)` chunk-copy loop instead (ported from
+   * polyengine-dioxus host.ts:540-565) — a benchmark harness comparing
+   * the two transports' overhead wants both available behind one flag. */
+  transport?: "direct" | "chunked";
+  /** Recording tap: called with a COPY of each chunk of stream bytes
+   * consumed, in order, from the very first byte. A copy in both
+   * transports — `readDirect`'s view aliases guest memory and is invalid
+   * once its callback returns, so retaining it without copying would be
+   * corrupt-by-construction; `chunked`'s `read()` result is already an
+   * owned chunk, but copying it too keeps this callback's contract
+   * uniform across transports rather than aliasing-safe in one and not
+   * the other. */
+  onChunk?(bytes: Uint8Array): void;
 }
 
 export interface Mounted {
   dispose(): void;
+  /** Running counts since mount: `batches` (commits applied — one
+   * `onCommit` firing each), `frames` (Frame messages decoded, whether or
+   * not they carried an op), `bytes` (stream bytes consumed, from the
+   * very first byte read). */
+  stats: { batches: number; frames: number; bytes: number };
+  /** Resolves after the NEXT `onCommit` finishes — including this
+   * module's own listener attach/detach bookkeeping, not just the
+   * backend's own op application. A benchmark harness awaits this instead
+   * of polling the DOM for "did the batch land yet". */
+  nextCommit(): Promise<void>;
 }
 
 /** WIT `queries.point`. */
@@ -63,14 +99,6 @@ class DomEvent {
     this.#native.stopPropagation();
   }
 }
-
-/** Sentinel method name for the `DOMRemoteReceiver` `call` trick
- * (`DOMRemoteReceiver`'s constructor `call` option — receivers/
- * DOMRemoteReceiver.ts — receives the real `Element` for an id and either
- * dispatches a method on it or, as used here, hands it straight back):
- * asking for this "method" returns the element itself rather than
- * invoking anything on it. */
-const NODE_CALL = "__stream_dom_node";
 
 type ElementLike = Element & {
   scrollLeft?: number;
@@ -111,43 +139,31 @@ function witTarget(target: ListenerTarget): WitEventTarget {
 /**
  * Mount a `polymorph:stream-dom` producer component into `opts.root`.
  *
- * Builds a `DOMRemoteReceiver` over the root, a `RemoteDomTranscoder` as
- * the frame sink, instantiates the component with `queries`/`events`
- * imports wired per contracts/embedder-api.md "Module wiring and
- * instantiation" (imports keyed by the verbatim interface id), reads the
- * mutation stream `run` returns, and delegates DOM events back into
- * `handle-event`.
+ * Builds the requested `Receiver` backend over `opts.root`, instantiates
+ * the component with `queries`/`events` imports wired per
+ * contracts/embedder-api.md "Module wiring and instantiation" (imports
+ * keyed by the verbatim interface id), reads the mutation stream `run`
+ * returns, and delegates DOM events back into `handle-event`.
  */
 export async function mount(opts: MountOptions): Promise<Mounted> {
   let disposed = false;
   const onError = opts.onError ?? (() => {});
   const gate = new DispatchGate(onError);
 
-  const receiver = new DOMRemoteReceiver({
-    root: opts.root,
-    call: (element, method, ...args) =>
-      method === NODE_CALL
-        ? element
-        : (element as unknown as Record<string, (...a: unknown[]) => unknown>)
-          [method](...args),
-  });
+  const receiver: Receiver = opts.receiver === "remote"
+    ? createRemoteReceiver(opts.root)
+    : new NativeDomReceiver(opts.root);
 
-  const transcoder = new RemoteDomTranscoder(receiver.connection);
-
-  function resolveNode(id: number): Node | undefined {
-    const rid = transcoder.ridFor(id);
-    if (rid === undefined) return undefined;
-    try {
-      return receiver.connection.call(rid, NODE_CALL) as Node;
-    } catch {
-      return undefined; // Not yet attached in the real DOM.
-    }
+  const stats = { batches: 0, frames: 0, bytes: 0 };
+  let commitWaiters: Array<() => void> = [];
+  function nextCommit(): Promise<void> {
+    return new Promise((resolve) => commitWaiters.push(resolve));
   }
 
   /** Real DOM node -> producer node id, for walking a native event's
    * bubble path back to a registered listener. Populated only when a
-   * listener is actually attached to a node (`transcoder.onCommit` below)
-   * — there is no minting fallback: a node with no entry here can hold no
+   * listener is actually attached to a node (`receiver.onCommit` below) —
+   * there is no minting fallback: a node with no entry here can hold no
    * `listenerFor` match either, since every registration goes through the
    * same attach step. */
   const nodeToId = new WeakMap<Node, number>();
@@ -161,7 +177,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   // guest) unwinds. The read queries fire nothing and need no bracket.
 
   function getClientRect(target: number): Rect | undefined {
-    const node = resolveNode(target) as ElementLike | undefined;
+    const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || typeof node.getBoundingClientRect !== "function") {
       return undefined;
     }
@@ -173,7 +189,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function getScrollOffset(target: number): Point | undefined {
-    const node = resolveNode(target) as ElementLike | undefined;
+    const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || !isNum(node.scrollLeft) || !isNum(node.scrollTop)) {
       return undefined;
     }
@@ -181,7 +197,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function getScrollSize(target: number): Size | undefined {
-    const node = resolveNode(target) as ElementLike | undefined;
+    const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || !isNum(node.scrollWidth) || !isNum(node.scrollHeight)) {
       return undefined;
     }
@@ -189,7 +205,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function setFocus(target: number, focus: boolean): boolean {
-    const node = resolveNode(target) as ElementLike | undefined;
+    const node = receiver.resolveNode(target) as ElementLike | undefined;
     const fn = focus ? node?.focus : node?.blur;
     if (typeof fn !== "function") return false;
     gate.beginApply();
@@ -235,13 +251,13 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function dispatchDelegated(name: string, ev: Event): void {
-    const nameRef = transcoder.refFor(name);
+    const nameRef = receiver.listeners.refFor(name);
     if (nameRef === undefined) return;
     let node: Node | null = ev.target as Node | null;
     while (node) {
       const id = nodeToId.get(node);
       if (id !== undefined) {
-        const listener = transcoder.listenerFor(id, nameRef);
+        const listener = receiver.listeners.listenerFor(id, nameRef);
         if (listener) {
           fire({ kind: "node", value: id }, nameRef, name, ev, listener);
           return;
@@ -266,7 +282,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     refcount: number;
     /** How many current registrants for this key are NON-passive — used
      * to decide whether the native listener must be (or must become)
-     * `passive: false` (see B7 below). */
+     * `passive: false`. */
     nonPassiveCount: number;
     capture: boolean;
     passive: boolean;
@@ -279,7 +295,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function ensureRootListener(listener: Listener): void {
-    const name = transcoder.stringFor(listener.name);
+    const name = receiver.listeners.stringFor(listener.name);
     const key = rootKey(name, listener.capture);
     let entry = rootListeners.get(key);
     if (!entry) {
@@ -325,7 +341,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function releaseRootListener(listener: Listener): void {
-    const name = transcoder.stringFor(listener.name);
+    const name = receiver.listeners.stringFor(listener.name);
     const key = rootKey(name, listener.capture);
     const entry = rootListeners.get(key);
     if (!entry) return;
@@ -376,7 +392,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     const byName = directListeners.get(target);
     const entry = byName?.get(listener.name);
     if (!entry) return;
-    const name = transcoder.stringFor(listener.name);
+    const name = receiver.listeners.stringFor(listener.name);
     target.removeEventListener(name, entry.handler, {
       capture: entry.capture,
     });
@@ -384,19 +400,20 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   /** Dispatch the synthetic initial-navigation event (docs/design.md
-   * "Global listeners" territory; see mount.ts's dispatch for the full
-   * reasoning): a `window` listener for `hashchange`/`popstate` fires once,
-   * right after it is attached, with the CURRENT `location.href` — the
-   * producer has no `location` to read at mount, so without this a deep
-   * link renders the default route until the first real navigation. Mirrors
-   * the synthetic `mounted` event's "once per registration" contract. */
+   * "Global listeners" territory): a `window` listener for
+   * `hashchange`/`popstate` fires once, right after it is attached, with
+   * the CURRENT `location.href` — the producer has no `location` to read
+   * at mount, so without this a deep link renders the default route until
+   * the first real navigation. Mirrors the synthetic `mounted` event's
+   * "once per registration" contract. */
   function dispatchSyntheticNavigation(name: string, listener: Listener): void {
     fire({ kind: "window" }, listener.name, name, new Event(name), listener);
   }
 
-  // Nodes only exist in the real DOM once `commit()`'s `mutate` call has
-  // run, so listener attach/detach happens in the `onCommit` hook, after.
-  transcoder.onCommit = () => {
+  // Nodes only exist for `resolveNode` once the backend has applied the
+  // batch, so listener attach/detach happens in the `onCommit` hook,
+  // after (both backends fire it at the same point — see receiver.ts).
+  receiver.onCommit = () => {
     // An entry whose node does not resolve yet (e.g. a listener add-op
     // that landed in the same batch as the insert, ordered before it, or
     // a node briefly unreachable via the receiver's `call`) is carried
@@ -405,10 +422,10 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     // node targets can miss this way; `window`/`document` always resolve.
     const stillPending: Array<{ target: ListenerTarget; listener: Listener }> =
       [];
-    for (const entry of transcoder.pendingAttach) {
+    for (const entry of receiver.listeners.pendingAttach) {
       const { target, listener } = entry;
       if (target.kind === "node") {
-        const node = resolveNode(target.id);
+        const node = receiver.resolveNode(target.id);
         if (!node) {
           stillPending.push(entry);
           continue;
@@ -417,7 +434,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
         if (listener.bubbles) {
           ensureRootListener(listener);
         } else {
-          const name = transcoder.stringFor(listener.name);
+          const name = receiver.listeners.stringFor(listener.name);
           attachDirectListener(node, witTarget(target), name, listener);
         }
         continue;
@@ -426,7 +443,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
       // (proto/stream-dom.proto Listener doc, docs/design.md "Global
       // listeners").
       const globalObj = target.kind === "window" ? window : document;
-      const name = transcoder.stringFor(listener.name);
+      const name = receiver.listeners.stringFor(listener.name);
       attachDirectListener(globalObj, witTarget(target), name, listener);
       if (
         target.kind === "window" &&
@@ -435,15 +452,15 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
         dispatchSyntheticNavigation(name, listener);
       }
     }
-    transcoder.pendingAttach.length = 0;
-    transcoder.pendingAttach.push(...stillPending);
+    receiver.listeners.pendingAttach.length = 0;
+    receiver.listeners.pendingAttach.push(...stillPending);
 
-    for (const { target, listener } of transcoder.pendingDetach) {
+    for (const { target, listener } of receiver.listeners.pendingDetach) {
       if (target.kind === "node") {
         if (listener.bubbles) {
           releaseRootListener(listener);
         } else {
-          const node = resolveNode(target.id);
+          const node = receiver.resolveNode(target.id);
           if (node) detachDirectListener(node, listener);
         }
         continue;
@@ -451,7 +468,12 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
       const globalObj = target.kind === "window" ? window : document;
       detachDirectListener(globalObj, listener);
     }
-    transcoder.pendingDetach.length = 0;
+    receiver.listeners.pendingDetach.length = 0;
+
+    stats.batches++;
+    const waiters = commitWaiters;
+    commitWaiters = [];
+    for (const w of waiters) w();
   };
 
   // -- instantiation + mutation stream ----------------------------------------
@@ -478,7 +500,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     hydrate: boolean,
   ) => Promise<Stream<number>>)(false);
 
-  const decoder = new FrameDecoder(transcoder);
+  const decoder = new FrameDecoder(receiver.sink);
 
   function dispose(): void {
     if (disposed) return;
@@ -498,45 +520,82 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
       if (!byName) continue;
       for (const [nameRef, entry] of byName) {
         globalObj.removeEventListener(
-          transcoder.stringFor(nameRef),
+          receiver.listeners.stringFor(nameRef),
           entry.handler,
-          {
-            capture: entry.capture,
-          },
+          { capture: entry.capture },
         );
       }
       directListeners.delete(globalObj);
     }
     stream.drop();
-    receiver.disconnect();
+    receiver.dispose();
   }
 
-  // Direct-access byte edge (contract:"Streams and futures", "Direct-access
-  // byte edges"): `consume` runs synchronously inside the rendezvous with a
-  // view over the writer's unread bytes; `decoder.push` copies what it
-  // keeps before `markRead` releases the view. One producer write is
-  // normally one whole batch, so this callback normally applies one batch;
-  // wrapped in the dispatch gate because DOM mutation can fire synchronous
-  // events (e.g. a removed, focused input firing `blur`).
-  const readLoop = stream.readDirect((src) => {
-    gate.beginApply();
-    try {
-      const view = src.remaining();
-      decoder.push(view);
-      src.markRead(view.length);
-    } finally {
-      gate.endApply();
-    }
-    return "more";
-  });
-  readLoop.catch((err: unknown) => {
-    if (disposed) return;
-    onError(err);
-    // A thrown/rejected `consume` leaves the guest's write parked forever
-    // if nothing ever drops the stream's read end — dispose so the guest
-    // observes reader-gone on its next write instead of hanging.
-    dispose();
-  });
+  /** Feed `bytes` to the decoder and update `stats.bytes`/`stats.frames`;
+   * called from both transports so the counting is identical either way. */
+  function consume(bytes: Uint8Array): void {
+    stats.bytes += bytes.length;
+    opts.onChunk?.(bytes.slice()); // a COPY — see MountOptions.onChunk's doc.
+    decoder.push(bytes);
+    stats.frames = decoder.frameCount;
+  }
 
-  return { dispose };
+  if (opts.transport === "chunked") {
+    // Ported from polyengine-dioxus host.ts:540-565: `stream.read(max)`
+    // copies a chunk out instead of aliasing guest memory. Same gate
+    // bracketing as the direct path — DOM mutation can still fire
+    // synchronous events (a removed, focused input firing `blur`).
+    const MAX_READ = 1 << 22;
+    (async () => {
+      while (!disposed) {
+        // `Chunk<u8>` is a `Uint8Array` at runtime (embedder-api.md "Value
+        // mapping": "Chunk<u8> = Uint8Array, else T[]"); the `Stream<number>`
+        // type import doesn't distinguish that from any other numeric
+        // stream, so the cast is just recovering what's already true.
+        const chunk = await stream.read(MAX_READ) as Uint8Array;
+        if (chunk.length === 0) break; // end of stream
+        gate.beginApply();
+        try {
+          consume(chunk);
+        } finally {
+          gate.endApply();
+        }
+      }
+    })().catch((err: unknown) => {
+      if (disposed) return;
+      onError(err);
+      dispose();
+    });
+  } else {
+    // Direct-access byte edge (contract:"Streams and futures", "Direct-
+    // access byte edges"): `consume` runs synchronously inside the
+    // rendezvous with a view over the writer's unread bytes; pushing it
+    // into the decoder copies what it keeps before `markRead` releases the
+    // view. One producer write is normally one whole batch, so this
+    // callback normally applies one batch; wrapped in the dispatch gate
+    // because DOM mutation can fire synchronous events (e.g. a removed,
+    // focused input firing `blur`).
+    const readLoop = stream.readDirect((src) => {
+      gate.beginApply();
+      try {
+        const view = src.remaining();
+        consume(view);
+        src.markRead(view.length);
+      } finally {
+        gate.endApply();
+      }
+      return "more";
+    });
+    readLoop.catch((err: unknown) => {
+      if (disposed) return;
+      onError(err);
+      // A thrown/rejected `consume` leaves the guest's write parked
+      // forever if nothing ever drops the stream's read end — dispose so
+      // the guest observes reader-gone on its next write instead of
+      // hanging.
+      dispose();
+    });
+  }
+
+  return { dispose, stats, nextCommit };
 }
