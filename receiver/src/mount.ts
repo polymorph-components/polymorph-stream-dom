@@ -19,6 +19,8 @@ import { encodePayload } from "./events.ts";
 import { FrameDecoder } from "./frames.ts";
 import type { Listener, ListenerTarget } from "./frames.ts";
 import { NativeDomReceiver } from "./native.ts";
+import { compilePolicy, queryAllowed } from "./policy.ts";
+import type { CompiledPolicy, Policy } from "./policy.ts";
 import { createRemoteReceiver } from "./remote.ts";
 import type { Receiver } from "./receiver.ts";
 
@@ -52,6 +54,17 @@ export interface MountOptions {
    * uniform across transports rather than aliasing-safe in one and not
    * the other. */
   onChunk?(bytes: Uint8Array): void;
+  /** Policy: the surface this embedder accepts, declared by proto name
+   * (policy.ts). THIS is the mechanism labelled fail-safe — undeclared
+   * mutation-stream surface is rejected, undeclared event payload fields
+   * are not encoded, undeclared `queries` refuse. A bare `FrameSink`
+   * wrapper (`Policy.sink`) or a byte-level transformer in front of the
+   * decoder is also possible and useful for semantic checks, but is NOT
+   * fail-safe: both pass surface they have never seen straight through.
+   *
+   * Compiling the policy validates every name; a policy naming something
+   * unknown makes `mount` reject. */
+  policy?: Policy;
 }
 
 export interface Mounted {
@@ -149,6 +162,11 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   let disposed = false;
   const onError = opts.onError ?? (() => {});
   const gate = new DispatchGate(onError);
+  // Construction errors (a name this build does not know) propagate out of
+  // `mount` — see policy.ts `compilePolicy`.
+  const policy: CompiledPolicy | undefined = opts.policy
+    ? compilePolicy(opts.policy)
+    : undefined;
 
   const receiver: Receiver = opts.receiver === "remote"
     ? createRemoteReceiver(opts.root)
@@ -177,6 +195,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   // guest) unwinds. The read queries fire nothing and need no bracket.
 
   function getClientRect(target: number): Rect | undefined {
+    if (!queryAllowed(policy, "get-client-rect")) return undefined;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || typeof node.getBoundingClientRect !== "function") {
       return undefined;
@@ -189,6 +208,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function getScrollOffset(target: number): Point | undefined {
+    if (!queryAllowed(policy, "get-scroll-offset")) return undefined;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || !isNum(node.scrollLeft) || !isNum(node.scrollTop)) {
       return undefined;
@@ -197,6 +217,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function getScrollSize(target: number): Size | undefined {
+    if (!queryAllowed(policy, "get-scroll-size")) return undefined;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || !isNum(node.scrollWidth) || !isNum(node.scrollHeight)) {
       return undefined;
@@ -205,6 +226,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   }
 
   function setFocus(target: number, focus: boolean): boolean {
+    if (!queryAllowed(policy, "set-focus")) return false;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     const fn = focus ? node?.focus : node?.blur;
     if (typeof fn !== "function") return false;
@@ -243,7 +265,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     if (listener.preventDefault) ev.preventDefault();
     if (listener.stopPropagation) ev.stopPropagation();
     if (!exports_.handleEvent || disposed) return;
-    const payload = encodePayload(name, ev);
+    const payload = encodePayload(name, ev, policy?.events);
     const domEvent = new DomEvent(ev);
     gate.dispatch(() =>
       exports_.handleEvent!(target, nameRef, payload, domEvent)
@@ -500,7 +522,13 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     hydrate: boolean,
   ) => Promise<Stream<number>>)(false);
 
-  const decoder = new FrameDecoder(receiver.sink);
+  // `Policy.sink` wraps the receiver's sink: ops reach it only if the
+  // wrapper forwards them, and only after `accept` has already rejected
+  // anything undeclared.
+  const sink = opts.policy?.sink
+    ? opts.policy.sink(receiver.sink)
+    : receiver.sink;
+  const decoder = new FrameDecoder(sink, { accept: policy?.accept });
 
   function dispose(): void {
     if (disposed) return;

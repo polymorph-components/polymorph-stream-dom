@@ -179,7 +179,8 @@ stream and in event payloads. The stream is the standard length-delimited form �
 length, then one `Frame`, repeated. No header; the package version is
 digest-checked at instantiation, and additive schema change (new `oneof`
 cases, new fields) needs no version bump because receivers skip what they
-do not know.
+do not know — except a receiver under a declared policy, which rejects
+what its embedder has not named ("Policy" below).
 
 Chosen over a hand-rolled positional layout, which was the previous
 draft, for four things it could not offer cheaply:
@@ -693,6 +694,83 @@ JS frameworks either run inside a component (componentize-js; the
 component-model semantics then apply uniformly) or as plain JS writing the
 same frames — for most JS frameworks the worker is the natural home.
 
+## Policy
+
+A producer may be untrusted: a plugin, a third-party app under a
+sandboxing host. What that host lets the producer put in its DOM —
+which tags, which attributes, which URL schemes, how many nodes — is the
+host's decision, and it is not made here. This protocol ships no
+allowlist, no `sanitize` transformer and no default vocabulary
+(resolving open question 10 the other way from remote-dom, which bakes
+an element registry into the host). What it ships is the seam a policy
+plugs into and one property the seam can guarantee.
+
+**The seam.** The decoder calls a `FrameSink`, one method per op, with
+`intern` and template trees included; a policy is a sink that wraps the
+receiver's and forwards what it allows. A throwing sink aborts the stream:
+no later op is applied, the mount's `onError` fires, the read end is
+dropped and the producer sees a dead channel on its next write.
+Partial-batch DOM state at that point is the embedder's to tear down, and
+for an untrusted producer teardown is the right answer — a conforming
+producer never emits a violating op, so a violation is a bug or hostile
+either way, and silently dropping it would hide exactly the signal the
+embedder wants. A recording of the stream (`onChunk`) reproduces any
+rejection offline.
+
+**Fail-safe by declaration.** A wrapper alone fails *open* when the
+protocol grows. The decoder skips unknown fields, as protobuf receivers
+do, and hands records to the wrapper whole: a new op, a new field on an
+existing message (`Listener.once`), or a new enum value reaches the
+wrapped receiver without the policy ever having a case for it. Type
+checking does not close this — an added optional field is
+type-compatible, JS consumers have no types, and a "bump the version
+constant" ritual gets performed without the review it was meant to force.
+So the receiver offers a second mechanism, the only one this document
+labels fail-safe: the embedder **declares by string every piece of
+protocol surface it accepts**, in the .proto's own names
+(`SetAttribute.value`, `Listener.prevent_default`, `Global.WINDOW`), and
+the decoder enforces the declaration before any value is consumed. Three
+directions, two behaviours:
+
+- Mutation stream (producer → receiver): an undeclared or unknown
+  field, op or enum value is a `PolicyError` and aborts the stream.
+  Unknown tags are *rejected*, not skipped — the protobuf convention is
+  right for cooperating peers and wrong for an adversarial one, and it
+  also closes the case of a producer newer than the receiver.
+- Event payloads (receiver → producer): an undeclared field is not
+  encoded. The receiver authors payloads, so there is no violator; the
+  producer merely learns less. A payload family not declared is the
+  empty payload. (Which event *names* a producer may subscribe to is
+  vocabulary, checked by the sink like any other value.)
+- `queries` (producer asks receiver): an undeclared query answers
+  `none` / `false`. WIT-level growth — a new import, a new `dom-event`
+  method — already fails closed by construction, since the embedder
+  supplies the imports.
+
+The declared lists are data: reviewable in a diff, and the same list
+serves a host in one realm and a re-validating applier in another.
+`SURFACE_V1` is a frozen snapshot of today's full surface, so
+`{ ...SURFACE_V1, sink }` is the one-line policy; it never grows, and an
+embedder that updates this dependency keeps exactly the exposure it
+reviewed until it names the new fields itself. Unknown or removed names
+fail at construction, not at first frame. This is not a compatibility
+promise — an embedder updates its policy when it updates the receiver —
+only a guarantee that the update cannot widen exposure silently.
+
+**What this imposes on the protocol.** The mechanism catches *new*
+surface; it cannot catch an existing field acquiring meaning it did not
+have. Hence the evolution rule: new meaning is a new field, existing
+fields never change semantics, tags are never reused (protobuf already
+requires the last). Implementation: `receiver/src/policy.ts`.
+
+**What the receiver does not yet guarantee.** Fail-closed on
+*malformed* streams — ids that do not resolve, cycles, out-of-range
+intern or template references, property names that walk the prototype,
+unbounded lengths. `templates.ts` validates the arena; the rest of the
+receiver was written for a trusted spike producer. Hardening it against
+hostile bytes is separate work, and a policy is only as good as the
+receiver behind it.
+
 ## Prior art
 
 Nothing existing can be adopted whole: no prior system runs as a
@@ -1030,9 +1108,11 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
 10. **Trust model.** The stream can create `<script>`, set `on*`
     attributes, `javascript:` hrefs and `innerHTML`. If a producer is ever
     third-party (a plugin), the receiver needs an allowlist — which is a
-    transformer, and remote-dom's reason for existing. Decide whether the
-    producer is trusted by definition or whether a `sanitize` transformer
-    is part of the reference set.
+    transformer, and remote-dom's reason for existing. *Resolved, see
+    "Policy":* the allowlist is the embedder's, not the protocol's; the
+    receiver ships the seam and a fail-safe declaration mechanism, no
+    `sanitize` transformer. Hardening the receiver against malformed
+    streams remains open.
 11. **View-transition batches.** A receiver must call
     `document.startViewTransition` before the first mutation of a batch
     that should animate, so the producer has to say so at the batch start.
