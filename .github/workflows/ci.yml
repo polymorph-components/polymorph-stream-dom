@@ -1,0 +1,47 @@
+# Runs exactly the justfile recipes, in order. New gates belong in the
+# justfile; this file only supplies a machine.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DENO_VERSION: "2.9.5"
+  WASM_TOOLS_VERSION: "1.247.0"
+  JUST_VERSION: "1.54.0"
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Toolchain version and targets come from rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: wasm32-wasip2
+          components: clippy
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@${{ env.JUST_VERSION }},wasm-tools@${{ env.WASM_TOOLS_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            guests/dominator
+      - run: just check
+      - run: just test
+      - run: just components
+      - run: just e2e

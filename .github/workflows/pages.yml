@@ -1,0 +1,59 @@
+# Builds and deploys the demo site to GitHub Pages. Runs the same
+# toolchain-setup steps as ci.yml (kept in sync manually — see that file's
+# header comment on why gate bodies live in the justfile, not here).
+name: pages
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  DENO_VERSION: "2.9.5"
+  WASM_TOOLS_VERSION: "1.247.0"
+  JUST_VERSION: "1.54.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: wasm32-wasip2
+          components: clippy
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@${{ env.JUST_VERSION }},wasm-tools@${{ env.WASM_TOOLS_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            guests/dominator
+      - run: just components
+      - run: just site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

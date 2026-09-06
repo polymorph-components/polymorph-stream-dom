@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>TodoMVC — Dominator • polymorph:stream-dom</title>
+    <link rel="stylesheet" href="./vendor/todomvc-common.css">
+    <link rel="stylesheet" href="./vendor/todomvc-app.css">
+    <style>
+    #error {
+      color: #c00;
+      white-space: pre-wrap;
+    }
+    </style>
+  </head>
+  <body>
+    <div id="app" data-component="dominator-todomvc"></div>
+    <pre id="error"></pre>
+    <footer class="info">
+      <p>TodoMVC markup/CSS from <a href="https://todomvc.com">todomvc.com</a>.
+  Producer: Dominator, compiled to a <code>polymorph:stream-dom</code> wasm
+  component. Receiver: <code>@polymorph/stream-dom-receiver</code>, streaming
+  into Shopify's <a href="https://github.com/Shopify/remote-dom">remote-dom</a>.</p>
+    </footer>
+    <script type="module" src="./entry.js"></script>
+  </body>
+</html>
