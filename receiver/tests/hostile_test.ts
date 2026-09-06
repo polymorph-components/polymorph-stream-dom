@@ -36,6 +36,16 @@ function prng(seed: number): () => number {
  * reproduces the browser's `HierarchyRequestError`; without it a cyclic
  * tree built by a hostile stream hangs the first traversal, and a fuzzer
  * that hangs reports nothing. */
+/** Is `node` `parent` itself, or one of its ancestors? Takes `parent` as
+ * an argument rather than walking from `this` inside the patched method:
+ * `deno lint`'s no-this-alias forbids binding `this` to a local. */
+function containsOrIs(parent: Node, node: Node): boolean {
+  for (let p: Node | null = parent; p !== null; p = p.parentNode) {
+    if (p === node) return true;
+  }
+  return false;
+}
+
 const guarded = new WeakSet<object>();
 function installHierarchyGuard(doc: Document): void {
   let proto: object | null = Object.getPrototypeOf(doc.createElement("div"));
@@ -49,13 +59,11 @@ function installHierarchyGuard(doc: Document): void {
       if (typeof orig !== "function") continue;
       const call = orig as (this: Node, ...args: unknown[]) => unknown;
       target[name] = function (this: Node, node: Node, ...rest: unknown[]) {
-        for (let p: Node | null = this; p !== null; p = p.parentNode) {
-          if (p === node) {
-            throw new DOMException(
-              `${name}: the node is an ancestor of the parent`,
-              "HierarchyRequestError",
-            );
-          }
+        if (containsOrIs(this, node)) {
+          throw new DOMException(
+            `${name}: the node is an ancestor of the parent`,
+            "HierarchyRequestError",
+          );
         }
         return call.call(this, node, ...rest);
       };

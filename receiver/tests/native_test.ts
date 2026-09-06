@@ -23,6 +23,16 @@ import type { TemplateNode } from "../src/frames.ts";
  * browser's guarantee. This is emulating a browser invariant, not testing
  * receiver code.
  */
+/** Is `node` `parent` itself, or one of its ancestors? Takes `parent` as
+ * an argument rather than walking from `this` inside the patched method:
+ * `deno lint`'s no-this-alias forbids binding `this` to a local. */
+function containsOrIs(parent: Node, node: Node): boolean {
+  for (let p: Node | null = parent; p !== null; p = p.parentNode) {
+    if (p === node) return true;
+  }
+  return false;
+}
+
 const guarded = new WeakSet<object>();
 function installHierarchyGuard(doc: Document): void {
   // linkedom mixes `insertBefore`/`appendChild` into several prototypes in
@@ -40,13 +50,11 @@ function installHierarchyGuard(doc: Document): void {
       if (typeof orig !== "function") continue;
       const call = orig as (this: Node, ...args: unknown[]) => unknown;
       target[name] = function (this: Node, node: Node, ...rest: unknown[]) {
-        for (let p: Node | null = this; p !== null; p = p.parentNode) {
-          if (p === node) {
-            throw new DOMException(
-              `${name}: the node is an ancestor of the parent`,
-              "HierarchyRequestError",
-            );
-          }
+        if (containsOrIs(this, node)) {
+          throw new DOMException(
+            `${name}: the node is an ancestor of the parent`,
+            "HierarchyRequestError",
+          );
         }
         return call.call(this, node, ...rest);
       };
@@ -101,7 +109,7 @@ Deno.test("NativeDomReceiver: every op on the happy path", () => {
   recv.insertBefore(1, 2, undefined);
   recv.insertAfter(1, 3, 2);
   recv.setText(2, "hello, world");
-  recv.setAttribute(1, CLASS, undefined, "greeting");
+  recv.setAttribute(1, CLASS, undefined, { kind: "text", value: "greeting" });
   recv.setProperty(1, CLASS, { kind: "text", value: "prop" });
   recv.addListener({
     target: { kind: "node", id: 1 },
@@ -130,7 +138,11 @@ Deno.test("NativeDomReceiver: every op on the happy path", () => {
       element: {
         tag: DIV,
         ns: undefined,
-        attrs: [{ name: CLASS, ns: undefined, value: "row" }],
+        attrs: [{
+          name: CLASS,
+          ns: undefined,
+          value: { kind: "text", value: "row" },
+        }],
         children: [1, 2],
       },
     },
@@ -237,7 +249,7 @@ Deno.test("NativeDomReceiver: the mount root may not be used as an insert anchor
 Deno.test("NativeDomReceiver: leaf ops on the root stay legal", () => {
   const { recv, root } = fixture();
   interned(recv);
-  recv.setAttribute(0, CLASS, undefined, "mounted");
+  recv.setAttribute(0, CLASS, undefined, { kind: "text", value: "mounted" });
   assertEquals(root.getAttribute("class"), "mounted");
   recv.setProperty(0, CLASS, { kind: "boolean", value: true });
   recv.setAttribute(0, CLASS, undefined, undefined);
@@ -324,7 +336,7 @@ Deno.test("NativeDomReceiver: set-attribute / set-property require an element", 
   recv.createText(2, "a");
 
   assertThrows(
-    () => recv.setAttribute(2, CLASS, undefined, "x"),
+    () => recv.setAttribute(2, CLASS, undefined, { kind: "text", value: "x" }),
     Error,
     "set-attribute target 2 is not an element",
   );
@@ -357,7 +369,7 @@ Deno.test("NativeDomReceiver: an unresolved string ref throws", () => {
     "string ref 77",
   );
   assertThrows(
-    () => recv.setAttribute(0, 77, undefined, "x"),
+    () => recv.setAttribute(0, 77, undefined, { kind: "text", value: "x" }),
     Error,
     "string ref 77",
   );
@@ -392,6 +404,105 @@ Deno.test("NativeDomReceiver: re-interning a live slot is legal (proto Intern: '
   recv.insertBefore(0, 1, undefined);
   recv.insertBefore(0, 2, undefined);
   assertEquals(root.innerHTML, "<div></div><span></span>");
+});
+
+// -- 5. asset attribute values --------------------------------------------
+
+/** Like `fixture()`, but with a `resolveAsset` hook — the receiver turns
+ * an opaque asset handle into a URL through it (proto `SetAttribute.asset`:
+ * "the producer never names a URL"). */
+function assetFixture(resolveAsset?: (handle: Uint8Array) => string) {
+  const win = parseHTML(
+    `<!doctype html><html><body><div id="root"></div></body></html>`,
+  );
+  const doc = win.document as unknown as Document;
+  const root = doc.getElementById("root")!;
+  return { root, recv: new NativeDomReceiver(root, resolveAsset) };
+}
+
+Deno.test("NativeDomReceiver: an asset attribute value is resolved through the hook", () => {
+  const seen: Uint8Array[] = [];
+  const { root, recv } = assetFixture((handle) => {
+    seen.push(handle);
+    return `/assets/${handle.join("-")}`;
+  });
+  recv.internString(DIV, "div");
+  recv.internString(CLASS, "src");
+  recv.createElement(1, DIV, undefined);
+  recv.insertBefore(0, 1, undefined);
+  recv.setAttribute(1, CLASS, undefined, {
+    kind: "asset",
+    handle: Uint8Array.of(1, 2),
+  });
+
+  assertEquals(seen, [Uint8Array.of(1, 2)]);
+  assertEquals(
+    (recv.resolveNode(1) as Element).getAttribute("src"),
+    "/assets/1-2",
+  );
+  assertEquals(root.children.length, 1);
+});
+
+Deno.test("NativeDomReceiver: a template attr asset resolves at registration", () => {
+  const { recv } = assetFixture((handle) => `/assets/${handle.join("-")}`);
+  recv.internString(DIV, "div");
+  recv.internString(CLASS, "src");
+  recv.registerTemplate(7, [{
+    kind: "element",
+    element: {
+      tag: DIV,
+      ns: undefined,
+      attrs: [{
+        name: CLASS,
+        ns: undefined,
+        value: { kind: "asset", handle: Uint8Array.of(9) },
+      }],
+      children: [],
+    },
+  }], [0]);
+  recv.cloneTemplate(7, 0, 20);
+  assertEquals(
+    (recv.resolveNode(20) as Element).getAttribute("src"),
+    "/assets/9",
+  );
+});
+
+Deno.test("NativeDomReceiver: an asset value with no resolveAsset configured throws", () => {
+  const { recv } = assetFixture();
+  recv.internString(DIV, "div");
+  recv.internString(CLASS, "src");
+  recv.createElement(1, DIV, undefined);
+  const message =
+    "stream-dom: asset attribute value but no resolveAsset configured";
+
+  assertThrows(
+    () =>
+      recv.setAttribute(1, CLASS, undefined, {
+        kind: "asset",
+        handle: Uint8Array.of(7),
+      }),
+    Error,
+    message,
+  );
+  // Template attrs resolve at registration, so the same error lands there.
+  assertThrows(
+    () =>
+      recv.registerTemplate(8, [{
+        kind: "element",
+        element: {
+          tag: DIV,
+          ns: undefined,
+          attrs: [{
+            name: CLASS,
+            ns: undefined,
+            value: { kind: "asset", handle: Uint8Array.of(7) },
+          }],
+          children: [],
+        },
+      }], [0]),
+    Error,
+    message,
+  );
 });
 
 // -- 6. insert / remove sanity --------------------------------------------

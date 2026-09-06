@@ -181,7 +181,18 @@ impl Batch {
             id,
             name,
             ns,
-            value: value.map(str::to_string),
+            value: value.map(|v| proto::set_attribute::Value::Text(v.to_owned())),
+        }));
+    }
+
+    /// Set an attribute to an opaque asset handle (proto/stream-dom.proto
+    /// `SetAttribute.asset`) rather than a text value.
+    pub fn set_attribute_asset(&mut self, id: NodeId, name: StrRef, ns: Option<StrRef>, handle: &[u8]) {
+        self.push(proto::frame::Op::SetAttribute(proto::SetAttribute {
+            id,
+            name,
+            ns,
+            value: Some(proto::set_attribute::Value::Asset(handle.to_vec())),
         }));
     }
 
@@ -492,6 +503,31 @@ mod tests {
         assert_eq!(
             dump, expected_dump,
             "fixtures/basic.txt is stale; regenerate with UPDATE_FIXTURES=1"
+        );
+    }
+
+    #[test]
+    fn set_attribute_asset_round_trips() {
+        let mut interner = Interner::new();
+        let mut b = Batch::new();
+        let src = interner.intern("src", &mut b);
+
+        b.set_attribute_asset(1, src, None, b"deadbeef");
+
+        let bytes = b.finish().expect("non-empty batch");
+        let frames = decode_all(&bytes);
+
+        let set_attribute = frames
+            .iter()
+            .find_map(|f| match &f.op {
+                Some(proto::frame::Op::SetAttribute(sa)) => Some(sa),
+                _ => None,
+            })
+            .expect("a SetAttribute frame");
+
+        assert_eq!(
+            set_attribute.value,
+            Some(proto::set_attribute::Value::Asset(b"deadbeef".to_vec()))
         );
     }
 }

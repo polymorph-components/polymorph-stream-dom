@@ -26,6 +26,7 @@ import type {
 import { DOMRemoteReceiver } from "@remote-dom/core/receivers";
 
 import type {
+  AttrValue,
   FrameSink,
   Listener,
   PropertyValue,
@@ -66,6 +67,24 @@ interface ShadowNode {
 interface Template {
   nodes: TemplateNode[];
   roots: number[];
+  /** Every string an element node in the arena names, resolved ONCE at
+   * `registerTemplate` time, per arena node index (`undefined` for
+   * non-element nodes). Interned slots can be overwritten (proto `Intern`:
+   * "Define (or overwrite) interned slot"), so resolving these per clone
+   * instead would let a re-intern between registration and clone stamp out
+   * a different element than the one registered — and under a policy, a
+   * different one than the policy approved (`PolicySink` judges templates
+   * with the strings current at registration). Asset handles resolve here
+   * too: once per template, not once per clone. */
+  resolved: (ResolvedElement | undefined)[];
+}
+
+/** One arena element node with all of its refs already resolved. */
+interface ResolvedElement {
+  tag: string;
+  ns: string | undefined;
+  /** `[name, value]` in the node's own `attrs` order. */
+  attrs: [string, string][];
 }
 
 function rootShadow(): ShadowNode {
@@ -126,6 +145,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
   #byProducerId = new Map<number, ShadowNode>();
   #templates = new Map<number, Template>();
   #ridCounter = 0;
+  #resolveAsset: ((handle: Uint8Array) => string) | undefined;
   #records: RemoteMutationRecord[] = [];
   readonly listeners: ListenerRegistry = new ListenerRegistry();
   onCommit: (() => void) | null = null;
@@ -133,9 +153,11 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
   constructor(
     connection: RemoteConnection,
     domReceiver: DOMRemoteReceiver | null = null,
+    resolveAsset?: (handle: Uint8Array) => string,
   ) {
     this.#connection = connection;
     this.#domReceiver = domReceiver;
+    this.#resolveAsset = resolveAsset;
     this.#bind(0, rootShadow());
   }
 
@@ -180,6 +202,18 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
 
   #str(ref: number): string {
     return this.listeners.stringFor(ref);
+  }
+
+  /** The string an attribute value sets: a literal, or the URL the host's
+   * `resolveAsset` hook returns for an asset handle. */
+  #attrText(value: AttrValue): string {
+    if (value.kind === "text") return value.value;
+    if (!this.#resolveAsset) {
+      throw new Error(
+        "stream-dom: asset attribute value but no resolveAsset configured",
+      );
+    }
+    return this.#resolveAsset(value.handle);
   }
 
   /** The remote id (`RemoteMutationRecord`/`DOMRemoteReceiver` id space)
@@ -524,7 +558,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     id: number,
     name: number,
     ns: number | undefined,
-    value: string | undefined,
+    value: AttrValue | undefined,
   ): void {
     // remote-dom has no setAttributeNS equivalent (UPDATE_PROPERTY_TYPE_ATTRIBUTE
     // -> plain `setAttribute`/`removeAttribute` in DOMRemoteReceiver.ts).
@@ -534,14 +568,15 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     void ns;
     const attrName = this.#str(name);
     const node = this.#resolve(id);
-    if (value === undefined) node.attrs.delete(attrName);
-    else node.attrs.set(attrName, value);
+    const text = value === undefined ? undefined : this.#attrText(value);
+    if (text === undefined) node.attrs.delete(attrName);
+    else node.attrs.set(attrName, text);
     if (node.attached) {
       this.#records.push([
         MUTATION_TYPE_UPDATE_PROPERTY,
         node.rid,
         attrName,
-        value ?? null,
+        text ?? null,
         UPDATE_PROPERTY_TYPE_ATTRIBUTE,
       ]);
     }
@@ -582,7 +617,18 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
 
   registerTemplate(id: number, nodes: TemplateNode[], roots: number[]): void {
     validateTemplateArena(id, nodes, roots);
-    this.#templates.set(id, { nodes, roots });
+    const resolved = nodes.map((n) =>
+      n.kind === "element"
+        ? {
+          tag: this.#str(n.element.tag),
+          ns: n.element.ns === undefined ? undefined : this.#str(n.element.ns),
+          attrs: n.element.attrs.map((a) =>
+            [this.#str(a.name), this.#attrText(a.value)] as [string, string]
+          ),
+        }
+        : undefined
+    );
+    this.#templates.set(id, { nodes, roots, resolved });
   }
 
   cloneTemplate(tmpl: number, root: number, id: number): void {
@@ -636,14 +682,15 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
           ids: [],
         };
       }
-      const attrs = new Map<string, string>();
-      for (const a of n.element.attrs) attrs.set(this.#str(a.name), a.value);
+      // Strings come from the registration-time table, never re-resolved
+      // here — see `Template.resolved`.
+      const el = template.resolved[idx]!;
       const shadow: ShadowNode = {
         rid: this.#nextRid(),
         kind: "element",
-        tag: this.#str(n.element.tag),
-        ns: n.element.ns === undefined ? undefined : this.#str(n.element.ns),
-        attrs,
+        tag: el.tag,
+        ns: el.ns,
+        attrs: new Map(el.attrs),
         props: new Map(),
         text: "",
         parent: null,
@@ -694,7 +741,10 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
  * `DOMRemoteReceiver` over `root`. Unit tests construct
  * `RemoteDomTranscoder` directly with a fake `RemoteConnection` instead
  * (see the class doc) — this factory is what `mount.ts` calls. */
-export function createRemoteReceiver(root: Element): RemoteDomTranscoder {
+export function createRemoteReceiver(
+  root: Element,
+  resolveAsset?: (handle: Uint8Array) => string,
+): RemoteDomTranscoder {
   const domReceiver = new DOMRemoteReceiver({
     root,
     call: (element, method, ...args) =>
@@ -703,5 +753,9 @@ export function createRemoteReceiver(root: Element): RemoteDomTranscoder {
         : (element as unknown as Record<string, (...a: unknown[]) => unknown>)
           [method](...args),
   });
-  return new RemoteDomTranscoder(domReceiver.connection, domReceiver);
+  return new RemoteDomTranscoder(
+    domReceiver.connection,
+    domReceiver,
+    resolveAsset,
+  );
 }

@@ -11,3 +11,4 @@
 #![allow(clippy::doc_markdown)]
 
 include!(concat!(env!("OUT_DIR"), "/polymorph.stream_dom.rs"));
+include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));

@@ -2,6 +2,7 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { FrameDecoder } from "../src/frames.ts";
 import { Writer } from "../src/proto.ts";
 import type {
+  AttrValue,
   FrameSink,
   Listener,
   PropertyValue,
@@ -32,7 +33,7 @@ type Call =
     id: number;
     name: number;
     ns: number | undefined;
-    value: string | undefined;
+    value: AttrValue | undefined;
   }
   | { op: "setProperty"; id: number; name: number; value: PropertyValue }
   | { op: "addListener"; listener: Listener }
@@ -82,7 +83,7 @@ class RecordingSink implements FrameSink {
     id: number,
     name: number,
     ns: number | undefined,
-    value: string | undefined,
+    value: AttrValue | undefined,
   ): void {
     this.calls.push({ op: "setAttribute", id, name, ns, value });
   }
@@ -179,7 +180,7 @@ Deno.test("FrameDecoder decodes basic.pb into basic.txt's 17 frames", async () =
     id: 1,
     name: 3,
     ns: undefined,
-    value: "greeting",
+    value: { kind: "text", value: "greeting" },
   });
   assertEquals(calls[13], {
     op: "addListener",

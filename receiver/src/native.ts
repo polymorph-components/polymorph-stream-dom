@@ -28,6 +28,7 @@
 //   animations that `insertBefore` resets").
 
 import type {
+  AttrValue,
   FrameSink,
   Listener,
   PropertyValue,
@@ -84,14 +85,19 @@ type MoveCapableParent = Node & {
  */
 export class NativeDomReceiver implements Receiver, FrameSink {
   #doc: Document;
+  #resolveAsset: ((handle: Uint8Array) => string) | undefined;
   #nodes = new Map<number, Node>();
   #ids = new WeakMap<Node, number>();
   #templates = new Map<number, CompiledTemplate>();
   readonly listeners: ListenerRegistry = new ListenerRegistry();
   onCommit: (() => void) | null = null;
 
-  constructor(root: Element) {
+  /** `resolveAsset` materializes an `AttrValue` asset handle into a URL
+   * (proto `SetAttribute.asset`); without it, a stream carrying an asset
+   * value is an error. */
+  constructor(root: Element, resolveAsset?: (handle: Uint8Array) => string) {
     this.#doc = root.ownerDocument;
+    this.#resolveAsset = resolveAsset;
     // The one binding of `ROOT_ID` that ever happens: `#register` rejects
     // it from here on.
     this.#bind(ROOT_ID, root);
@@ -158,6 +164,18 @@ export class NativeDomReceiver implements Receiver, FrameSink {
 
   #str(ref: number): string {
     return this.listeners.stringFor(ref);
+  }
+
+  /** The string an attribute value sets: a literal, or the URL the host's
+   * `resolveAsset` hook returns for an asset handle. */
+  #attrText(value: AttrValue): string {
+    if (value.kind === "text") return value.value;
+    if (!this.#resolveAsset) {
+      throw new Error(
+        "stream-dom: asset attribute value but no resolveAsset configured",
+      );
+    }
+    return this.#resolveAsset(value.handle);
   }
 
   /** `#resolve` plus the op's node-type precondition. Without it
@@ -362,7 +380,7 @@ export class NativeDomReceiver implements Receiver, FrameSink {
     id: number,
     name: number,
     ns: number | undefined,
-    value: string | undefined,
+    value: AttrValue | undefined,
   ): void {
     const el = this.#element("set-attribute", id);
     const attrName = this.#str(name);
@@ -370,8 +388,9 @@ export class NativeDomReceiver implements Receiver, FrameSink {
       if (ns === undefined) el.removeAttribute(attrName);
       else el.removeAttributeNS(this.#str(ns), attrName);
     } else {
-      if (ns === undefined) el.setAttribute(attrName, value);
-      else el.setAttributeNS(this.#str(ns), attrName, value);
+      const text = this.#attrText(value);
+      if (ns === undefined) el.setAttribute(attrName, text);
+      else el.setAttributeNS(this.#str(ns), attrName, text);
     }
   }
 
@@ -417,8 +436,12 @@ export class NativeDomReceiver implements Receiver, FrameSink {
           this.#str(n.element.tag),
         );
       for (const a of n.element.attrs) {
-        if (a.ns === undefined) el.setAttribute(this.#str(a.name), a.value);
-        else el.setAttributeNS(this.#str(a.ns), this.#str(a.name), a.value);
+        // Asset handles resolve HERE, at registration: the prototype is
+        // built once and cloned, so a later re-intern (or a later hook)
+        // cannot make a clone diverge from what was registered.
+        const text = this.#attrText(a.value);
+        if (a.ns === undefined) el.setAttribute(this.#str(a.name), text);
+        else el.setAttributeNS(this.#str(a.ns), this.#str(a.name), text);
       }
       for (const childIdx of n.element.children) {
         el.appendChild(build(childIdx));
