@@ -35,7 +35,9 @@ component name manifest artifact:
 site:
     deno run --allow-read --allow-write --allow-env --allow-net --allow-run web/build.ts
 
-# Playwright end-to-end run against dist/ (installs Chromium on first use).
+# Playwright end-to-end run against dist/. Chromium is installed with
+# Node's npx: `deno run npm:playwright install` hangs after the download
+# (reproduced locally and in CI), npx completes.
 e2e: site
-    deno run -A npm:playwright@1.58 install chromium
+    npx -y playwright@1.58 install chromium
     deno test -A web/e2e/
