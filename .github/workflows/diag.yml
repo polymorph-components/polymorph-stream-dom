@@ -47,32 +47,33 @@ jobs:
       - run: just components
       - run: just site
       - run: |
-          mkdir -p /tmp/diag && cd /tmp/diag && npm i tachometer@0.7.1 playwright@1.63.0 --silent
-          npx playwright install chromium
+          mkdir -p /tmp/diag && cd /tmp/diag && npm i tachometer@0.7.1 selenium-webdriver@4 chromedriver@152 --silent
           cat > diag.mjs <<'EOS'
           import { Server } from 'tachometer/lib/server.js';
-          import { chromium } from 'playwright';
+          import webdriver from 'selenium-webdriver';
+          import chrome from 'selenium-webdriver/chrome.js';
+          import 'chromedriver';
           const root = process.argv[2];
           const s = await Server.start({ host: '127.0.0.1', ports: [0], root, resolveBareModules: true, mountPoints: [{ diskPath: root, urlPath: '/' }], cache: false, npmInstalls: [] });
           const url = s.url + '/bench.html?app=dioxus-bench&receiver=native&transport=direct&op=create-1k';
-          for (const opts of [{ channel: 'chrome', headless: true }, { channel: 'chrome', headless: true, args: ['--headless=new'] }, {}]) {
-            console.log('=== launch', JSON.stringify(opts));
-            const b = await chromium.launch(opts);
-            const first = await b.newPage(); await first.goto('about:blank');
-            const page = await b.newPage();
-            page.on('console', (m) => console.log('console:', m.type(), m.text().slice(0, 400)));
-            page.on('pageerror', (e) => console.log('pageerror:', String(e).slice(0, 800)));
-            page.on('response', (r) => { if (r.status() >= 400) console.log('http', r.status(), r.url()); });
-            const t0 = Date.now();
-            await page.goto(url);
-            console.log('visibility:', await page.evaluate(() => document.visibilityState));
-            console.log('raf fired within 2s:', await page.evaluate(() => new Promise((r) => { requestAnimationFrame(() => r(true)); setTimeout(() => r(false), 2000); })));
-            await page.waitForTimeout(12000);
-            console.log('result after', Date.now() - t0, 'ms:', JSON.stringify(await page.evaluate(() => ({ r: globalThis.__benchResult, t: globalThis.tachometerResult }))));
-            console.log('chrome version:', b.version());
-            await b.close();
+          const opts = new chrome.Options(); opts.addArguments('--headless', '--window-size=1024,768');
+          const prefs = new webdriver.logging.Preferences(); prefs.setLevel('browser', webdriver.logging.Level.ALL); opts.setLoggingPrefs(prefs);
+          const driver = await new webdriver.Builder().forBrowser('chrome').setChromeOptions(opts).build();
+          const first = (await driver.getAllWindowHandles())[0];
+          await driver.executeScript('window.open("", "", "noopener=yes");');
+          const handles = await driver.getAllWindowHandles();
+          await driver.switchTo().window(handles.find((h) => h !== first));
+          const t0 = Date.now();
+          await driver.get(url);
+          console.log('after get:', Date.now() - t0, 'ms');
+          for (let i = 0; i < 40; i++) {
+            await new Promise((r) => setTimeout(r, 500));
+            const st = await driver.executeScript('return JSON.stringify({ t: window.tachometerResult, r: window.__benchResult, vis: document.visibilityState, bench: !!document.getElementById("bench"), sd: !!(globalThis.__streamDom && globalThis.__streamDom.mounted) })');
+            console.log(Date.now() - t0, 'ms', st);
+            if (JSON.parse(st).t !== undefined || JSON.parse(st).r) break;
           }
-          await s.close();
+          for (const e of await driver.manage().logs().get('browser')) console.log('browserlog:', e.level.name, e.message.slice(0, 500));
+          await driver.quit(); await s.close();
           EOS
           node diag.mjs "$GITHUB_WORKSPACE/dist"
       - run: deno run -A bench/run.ts --sample-size 2 --filter dioxus-bench/native/direct/create-1k
