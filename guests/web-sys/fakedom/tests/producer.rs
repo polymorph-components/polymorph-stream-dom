@@ -15,7 +15,7 @@ use prost::Message;
 use std::cell::RefCell;
 use std::rc::Rc;
 use stream_dom_fakedom::dom;
-use stream_dom_fakedom::event::{dispatch, Verdict};
+use stream_dom_fakedom::event::{dispatch, Target, Verdict};
 use stream_dom_guest::proto::{self, frame::Op};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
@@ -38,9 +38,13 @@ fn frames() -> Vec<proto::Frame> {
 /// `web_sys::window()` is `js_sys::global().dyn_into::<Window>()`, so the
 /// fake DOM has to have installed `globalThis` before the first call. The
 /// driver does this in `run`; a test fixture has to do it itself.
-fn document() -> web_sys::Document {
+fn window() -> web_sys::Window {
     stream_dom_fakedom::install();
-    web_sys::window().unwrap().document().unwrap()
+    web_sys::window().unwrap()
+}
+
+fn document() -> web_sys::Document {
+    window().document().unwrap()
 }
 
 /// The protocol's mount root (node id 0) as a `Node`. `document.body` is
@@ -92,7 +96,14 @@ fn assert_define_before_use(frames: &[proto::Frame]) {
             Op::CreateText(c) => nodes.push(c.id),
             Op::CreatePlaceholder(c) => nodes.push(c.id),
             Op::InsertBefore(i) => {
-                used_node(&nodes, i.parent, "insert-before parent");
+                // The shim always knows the parent (the shadow tree tracks
+                // it), so it always states it even where the protocol would
+                // let the anchor imply it.
+                used_node(
+                    &nodes,
+                    i.parent.expect("the shim always names a parent"),
+                    "insert-before parent",
+                );
                 used_node(&nodes, i.id, "insert-before id");
                 if let Some(a) = i.anchor {
                     used_node(&nodes, a, "insert-before anchor");
@@ -114,7 +125,11 @@ fn assert_define_before_use(frames: &[proto::Frame]) {
             Op::AddListener(proto::AddListener { listener })
             | Op::RemoveListener(proto::RemoveListener { listener }) => {
                 let l = listener.as_ref().unwrap();
-                used_node(&nodes, l.id, "listener");
+                // A `Global` target names no node, so there is nothing to
+                // have created first.
+                if let Some(proto::listener::Target::Id(id)) = l.target {
+                    used_node(&nodes, id, "listener");
+                }
                 used_slot(&slots, l.name, "listener name");
             }
             other => panic!("unexpected op in these batches: {other:?}"),
@@ -249,7 +264,7 @@ fn moving_an_attached_node_is_one_insert_before_and_no_remove() {
     let Op::InsertBefore(i) = ops[0] else {
         panic!("expected insert-before, got {:?}", ops[0])
     };
-    assert_eq!(i.parent, 0);
+    assert_eq!(i.parent, Some(0));
     assert_eq!(i.anchor, Some(node_id(&a)));
     assert_eq!(i.id, node_id(&c));
 
@@ -353,7 +368,7 @@ fn a_form_event_updates_the_control_before_the_handlers_run() {
 
     let verdict = Rc::new(Verdict::default());
     assert!(dispatch(
-        id,
+        Target::Node(id),
         "input",
         form_payload("abc", None),
         verdict.clone()
@@ -362,7 +377,7 @@ fn a_form_event_updates_the_control_before_the_handlers_run() {
 
     let verdict = Rc::new(Verdict::default());
     assert!(dispatch(
-        id,
+        Target::Node(id),
         "keydown",
         key_payload("Enter"),
         verdict.clone()
@@ -397,7 +412,7 @@ fn a_checkbox_change_delivers_checked() {
     }
 
     dispatch(
-        id,
+        Target::Node(id),
         "change",
         form_payload("on", Some(true)),
         Rc::new(Verdict::default()),
@@ -456,7 +471,12 @@ fn propagation_stops_at_the_node_boundary_not_mid_node() {
         seen.borrow_mut().clear();
         stop.set(stop_kind);
         let verdict = Rc::new(Verdict::default());
-        dispatch(inner_id, "click", mouse_payload(), verdict.clone());
+        dispatch(
+            Target::Node(inner_id),
+            "click",
+            mouse_payload(),
+            verdict.clone(),
+        );
         verdict
     };
 
@@ -485,7 +505,7 @@ fn an_event_for_an_unknown_node_is_dropped() {
     // node racing an event already in flight (proto/stream-dom.proto file
     // header: "An event for an unknown id is dropped").
     assert!(!dispatch(
-        9999,
+        Target::Node(9999),
         "click",
         mouse_payload(),
         Rc::new(Verdict::default())
@@ -575,4 +595,158 @@ fn focus_is_an_effect_not_a_frame() {
         dom::take_effects(),
         vec![dom::Effect::Focus(id, true), dom::Effect::Focus(id, false)]
     );
+}
+
+// --- Global listeners ---------------------------------------------------
+
+fn navigation_payload(href: &str) -> proto::EventPayload {
+    proto::EventPayload {
+        family: Some(proto::event_payload::Family::Navigation(
+            proto::NavigationData {
+                href: href.to_string(),
+            },
+        )),
+    }
+}
+
+/// `window` and `document` are named on the wire by `Listener.target`'s
+/// `Global` arm rather than by an id (proto/stream-dom.proto; docs/design.md
+/// "Events" -> global listeners). Before that arm existed the shim had to
+/// panic here, because a listener frame naming `window` would have named a
+/// node the receiver never saw.
+#[test]
+fn a_window_listener_targets_the_global_not_a_node() {
+    let window = window();
+    listen(window.as_ref(), "hashchange", |_| {});
+
+    let win_frames = frames();
+    assert_define_before_use(&win_frames);
+
+    let listener = win_frames
+        .iter()
+        .find_map(|f| match &f.op {
+            Some(Op::AddListener(l)) => l.listener,
+            _ => None,
+        })
+        .expect("an add-listener frame");
+
+    assert_eq!(
+        listener.target,
+        Some(proto::listener::Target::Global(
+            proto::Global::Window as i32
+        ))
+    );
+    assert_eq!(interned(&win_frames, listener.name), "hashchange");
+    assert!(
+        !listener.bubbles,
+        "globals are attached directly, never delegated, so `bubbles` says nothing"
+    );
+
+    // `document` takes the other arm.
+    let document = document();
+    listen(document.as_ref(), "visibilitychange", |_| {});
+    let doc_frames = frames();
+    let listener = doc_frames
+        .iter()
+        .find_map(|f| match &f.op {
+            Some(Op::AddListener(l)) => l.listener,
+            _ => None,
+        })
+        .expect("an add-listener frame");
+    assert_eq!(
+        listener.target,
+        Some(proto::listener::Target::Global(
+            proto::Global::Document as i32
+        ))
+    );
+}
+
+fn interned(frames: &[proto::Frame], slot: u32) -> &str {
+    frames
+        .iter()
+        .find_map(|f| match &f.op {
+            Some(Op::Intern(i)) if i.id == slot => Some(i.s.as_str()),
+            _ => None,
+        })
+        .expect("the slot was interned in this batch")
+}
+
+/// A global event is delivered straight to its singleton: there is no tree
+/// above `window` to capture or bubble through, so this is the DOM's
+/// AT_TARGET phase and *both* capture and bubble listeners run.
+///
+/// The capture case is not hypothetical: dominator's `global_event`
+/// registers in the capture phase, because its `EventOptions::bubbles =
+/// false` maps to `EventListenerPhase::Capture`
+/// (dominator-0.5.38/src/dom.rs:752). A global path that fired only
+/// non-capture listeners would silently drop every global listener a
+/// Dominator app has, which is exactly what happened before this assert.
+#[test]
+fn a_hashchange_reaches_a_window_listener_with_its_url() {
+    let window = window();
+    let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+
+    {
+        let seen = seen.clone();
+        listen(window.as_ref(), "hashchange", move |e| {
+            let e: &web_sys::HashChangeEvent = e.unchecked_ref();
+            seen.borrow_mut().push(format!("bubble:{}", e.new_url()));
+        });
+    }
+    {
+        // The phase dominator actually uses.
+        let seen = seen.clone();
+        let cb = Closure::wrap(Box::new(move |e: &Event| {
+            let e: &web_sys::HashChangeEvent = e.unchecked_ref();
+            seen.borrow_mut().push(format!("capture:{}", e.new_url()));
+        }) as Box<dyn FnMut(&Event)>);
+        let options = web_sys::AddEventListenerOptions::new();
+        options.set_capture(true);
+        <web_sys::Window as AsRef<web_sys::EventTarget>>::as_ref(&window)
+            .add_event_listener_with_callback_and_add_event_listener_options(
+                "hashchange",
+                cb.as_ref().unchecked_ref(),
+                &options,
+            )
+            .unwrap();
+        cb.forget();
+    }
+    // A listener on a node in the mount must not see it.
+    let root = mount_root();
+    let div = element("div");
+    root.append_child(div.as_ref()).unwrap();
+    {
+        let seen = seen.clone();
+        listen(div.as_ref(), "hashchange", move |_| {
+            seen.borrow_mut().push("node".to_string());
+        });
+    }
+    let _ = dom::take_batch();
+
+    assert!(dispatch(
+        Target::Window,
+        "hashchange",
+        navigation_payload("http://x/#/completed"),
+        Rc::new(Verdict::default()),
+    ));
+
+    assert_eq!(
+        *seen.borrow(),
+        [
+            "bubble:http://x/#/completed",
+            "capture:http://x/#/completed"
+        ]
+    );
+}
+
+/// A global target always resolves: the singletons cannot have been
+/// removed, unlike a node id.
+#[test]
+fn a_global_target_always_resolves() {
+    assert!(dispatch(
+        Target::Document,
+        "visibilitychange",
+        proto::EventPayload::default(),
+        Rc::new(Verdict::default()),
+    ));
 }

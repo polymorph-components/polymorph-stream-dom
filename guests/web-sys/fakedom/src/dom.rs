@@ -51,17 +51,19 @@ pub struct Dom {
 
 impl Dom {
     fn new() -> Dom {
-        let mut ids = Ids::new();
+        let ids = Ids::new();
         // The mount root is id 0 by protocol and is never created by a
         // frame: the receiver already has it. It is element-like so that
         // `append_child` works on it, with no tag of its own.
         let root = NodeData::element(0, "", None);
-        // `document` and `window` are event targets and factories, never
-        // addressed on the wire. They still need ids the allocator will
-        // not hand to a real node, so they take ordinary allocations that
-        // simply never appear in a frame.
-        let document = NodeData::document(ids.alloc());
-        let window = NodeData::window(ids.alloc());
+        // `document` and `window` are named on the wire by
+        // `Listener.target`'s `Global` arm, not by an id
+        // (proto/stream-dom.proto; docs/design.md "Events" -> global
+        // listeners), so they take no id from the allocator. `0` marks
+        // them as unaddressable: it is the mount root's id, which neither
+        // of them is, and nothing ever reads it for these two.
+        let document = NodeData::document(0);
+        let window = NodeData::window(0);
         // `web_sys::window()` is `js_sys::global().dyn_into::<Window>()`
         // (web-sys-0.3.105/src/lib.rs:38), so `globalThis` *is* the window
         // object here, and the whole fake DOM hangs off it. Installed as
@@ -124,6 +126,15 @@ pub fn document() -> JsValue {
 
 pub fn window() -> JsValue {
     with_dom(|d| d.window.value())
+}
+
+/// The `window` singleton as a node, for dispatching a global event to it.
+pub fn window_node() -> Rc<NodeData> {
+    with_dom(|d| d.window.clone())
+}
+
+pub fn document_node() -> Rc<NodeData> {
+    with_dom(|d| d.document.clone())
 }
 
 // --- Batch plumbing ---------------------------------------------------
@@ -232,8 +243,8 @@ pub fn create_comment() -> JsValue {
 
 /// `parent.insertBefore(child, anchor)`. If `child` is already attached
 /// this is a move, and the protocol expresses it as a bare `insert-before`
-/// with no preceding `remove` — see docs/design.md "Tree ops are
-/// `insert-before(parent, id, anchor?)`".
+/// with no preceding `remove` — see docs/design.md "Tree ops". The parent
+/// is always stated: unlike Dioxus, the shadow DOM knows it.
 pub fn insert_before(parent: &NodeData, child: &NodeData, anchor: Option<&NodeData>) {
     // Detach in the shadow first, so an intra-parent move computes its
     // anchor against the post-detach child list, exactly as the DOM does.
@@ -251,7 +262,7 @@ pub fn insert_before(parent: &NodeData, child: &NodeData, anchor: Option<&NodeDa
 
     with_dom(|d| {
         d.batch
-            .insert_before(parent.id, child.id, anchor.map(|a| a.id))
+            .insert_before(Some(parent.id), child.id, anchor.map(|a| a.id))
     });
     request_flush();
 }
@@ -541,26 +552,26 @@ pub fn name_bubbles(name: &str) -> bool {
     )
 }
 
-/// The protocol addresses nodes under the mount root and nothing above it
-/// (proto/stream-dom.proto: "`0` is the mount root"), so `window` and
-/// `document` have no id a receiver could resolve. A listener on either
-/// would emit a frame naming a node the receiver never saw, breaking
-/// define-before-use — so it is refused here rather than silently
-/// mis-addressed. Reached by `dominator::routing` (a `popstate` listener
-/// on `window`) and by its media-query support; neither is used by the
-/// TodoMVC port. See the report: this is a genuine gap in the protocol,
-/// not just in this shim.
-fn assert_addressable(node: &NodeData, what: &str) {
-    assert!(
-        !matches!(node.kind, NodeKind::Window | NodeKind::Document),
-        "fakedom: {what} on window/document has no addressable target in \
-         polymorph:stream-dom; the receiver owns everything above the mount root"
-    );
+/// How a listener names its target on the wire: a node id, or one of the
+/// two receiver-side singletons a producer may name without creating
+/// (proto/stream-dom.proto `Listener.target`; docs/design.md "Events" ->
+/// global listeners). Dominator reaches the global arm through
+/// `DomBuilder::global_event`, which registers on `window`.
+fn wire_target(node: &NodeData) -> proto::listener::Target {
+    match node.kind {
+        NodeKind::Window => proto::listener::Target::Global(proto::Global::Window as i32),
+        NodeKind::Document => proto::listener::Target::Global(proto::Global::Document as i32),
+        _ => proto::listener::Target::Id(node.id),
+    }
+}
+
+/// Globals are attached directly by the receiver, never delegated, so
+/// there is nothing for `bubbles` to describe.
+fn is_global(node: &NodeData) -> bool {
+    matches!(node.kind, NodeKind::Window | NodeKind::Document)
 }
 
 pub fn add_listener(node: &NodeData, name: &str, capture: bool, passive: bool, callback: JsValue) {
-    assert_addressable(node, "addEventListener");
-
     // One `AddListener` per (node, name) however many callbacks are
     // registered: the receiver dispatches once per event and this shim
     // fans out to all of them.
@@ -575,14 +586,13 @@ pub fn add_listener(node: &NodeData, name: &str, capture: bool, passive: bool, c
         with_dom(|d| {
             let name_ref = d.interner.intern(name, &mut d.batch);
             d.batch
-                .add_listener(listener_msg(node.id, name_ref, name, capture, passive));
+                .add_listener(listener_msg(node, name_ref, name, capture, passive));
         });
         request_flush();
     }
 }
 
 pub fn remove_listener(node: &NodeData, name: &str, callback: &JsValue, capture: bool) {
-    assert_addressable(node, "removeEventListener");
     {
         let mut listeners = node.listeners_mut();
         if let Some(i) = listeners
@@ -596,23 +606,25 @@ pub fn remove_listener(node: &NodeData, name: &str, callback: &JsValue, capture:
         with_dom(|d| {
             let name_ref = d.interner.intern(name, &mut d.batch);
             d.batch
-                .remove_listener(listener_msg(node.id, name_ref, name, capture, false));
+                .remove_listener(listener_msg(node, name_ref, name, capture, false));
         });
         request_flush();
     }
 }
 
 fn listener_msg(
-    id: NodeId,
+    node: &NodeData,
     name_ref: StrRef,
     name: &str,
     capture: bool,
     passive: bool,
 ) -> proto::Listener {
     proto::Listener {
-        id,
+        target: Some(wire_target(node)),
         name: name_ref,
-        bubbles: name_bubbles(name),
+        // A global is attached directly by the receiver, never delegated,
+        // so there is nothing for `bubbles` to describe.
+        bubbles: !is_global(node) && name_bubbles(name),
         capture,
         passive,
         // The declarative flags are the remote-receiver path

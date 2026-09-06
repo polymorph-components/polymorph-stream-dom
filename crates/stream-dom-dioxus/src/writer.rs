@@ -10,7 +10,7 @@
 //! (two-pass intern-then-flatten, pointer-identity template key) and the
 //! `event_bubbles` verdict on listener ops.
 //!
-//! Three pieces of bookkeeping do that resolution:
+//! Two pieces of bookkeeping do that resolution:
 //!
 //! - **Ids.** Dioxus `ElementId`s are slab indices and *are* reused; protocol
 //!   node ids are never reused (proto/stream-dom.proto file header). So every
@@ -18,13 +18,16 @@
 //!   the id it displaced is dropped, which is what makes a stale
 //!   `handle-event` for a removed node a clean "unknown id, drop".
 //! - **Stack.** `stack: Vec<NodeId>` replays Dioxus's push/pop discipline so
-//!   `append_children(id, m)` and kin become `m` explicit `insert-before`s.
-//! - **Parents.** `insert-before` names a parent even when it has an anchor,
-//!   and Dioxus never tells a renderer who the parent is (the browser's
-//!   `insertBefore`/`replaceWith` do not need it). [`Location`] records, per
-//!   node, either the parent it was inserted under or the (template root,
-//!   path) it was cloned at, and [`MutationWriter::parent_of`] resolves the
-//!   latter by binding the interior node lazily.
+//!   `append_children(id, m)` and kin become `m` explicit insert ops.
+//!
+//! Parentage is *not* tracked. `insert-before`'s `parent` is optional when it
+//! has an anchor and `insert-after` always has one
+//! (proto/stream-dom.proto `InsertBefore`/`InsertAfter`), so every mutation
+//! Dioxus states anchor-relative goes on the wire anchor-relative — which is
+//! exactly what Dioxus gives a renderer. The only parent the writer ever
+//! names is one Dioxus named first (`append_children`). What survives is an
+//! *ownership* map, which is subtree bookkeeping (see
+//! [`MutationWriter::link`]), not DOM parentage.
 //!
 //! This module deliberately names no WIT bindings, so `cargo test` can drive
 //! a real `VirtualDom` through it natively (see `tests/writer_stream.rs`).
@@ -37,20 +40,6 @@ use dioxus_core::{
 };
 use rustc_hash::FxHashMap;
 use stream_dom_guest::{proto, Batch, Ids, Interner, NodeId, StrRef};
-
-/// Where a node sits, which is what `insert-before`'s mandatory `parent`
-/// needs and Dioxus never states.
-#[derive(Clone, Debug)]
-enum Location {
-    /// Inserted (or about to be) directly under a known parent. `None` while
-    /// the node is still detached — freshly cloned or created and only on the
-    /// stack.
-    Root { parent: Option<NodeId> },
-    /// An interior node of the template clone rooted at `root`, reached by
-    /// walking child indices `path`. Its parent is the node at `path[..n-1]`,
-    /// or `root` itself when the path is one step long.
-    InTemplate { root: NodeId, path: Vec<u8> },
-}
 
 /// Encodes Dioxus mutations as `polymorph:stream-dom` frames into a
 /// [`Batch`].
@@ -73,16 +62,12 @@ pub struct MutationWriter {
     node_to_el: FxHashMap<NodeId, ElementId>,
     /// Dioxus's renderer stack, resolved here rather than on the wire.
     stack: Vec<NodeId>,
-    location: FxHashMap<NodeId, Location>,
-    /// Interior template nodes that have been given an id, keyed by the clone
-    /// root and the path walked from it. Populated by `assign_node_id` and by
-    /// [`MutationWriter::bind_interior`]'s lazy binding.
-    bound: FxHashMap<(NodeId, Vec<u8>), NodeId>,
     /// Ownership tree, for forgetting a whole subtree when its root is
-    /// removed. Maintained wherever `location` is, and read only by
+    /// removed, and its reverse. Read by
     /// [`MutationWriter::forget_subtree`]; see [`MutationWriter::link`] for
-    /// why "owner" is not exactly "DOM parent".
+    /// what "owner" means and why it is not DOM parentage.
     children: FxHashMap<NodeId, Vec<NodeId>>,
+    owner: FxHashMap<NodeId, NodeId>,
     /// Per-element style declarations. The protocol has one `style`
     /// attribute, not a style map, so Dioxus's per-property
     /// `set_attribute(name, ns = "style", ...)` accumulates here and is
@@ -110,9 +95,8 @@ impl MutationWriter {
             el_to_node: vec![Some(0)],
             node_to_el,
             stack: Vec::new(),
-            location: FxHashMap::default(),
-            bound: FxHashMap::default(),
             children: FxHashMap::default(),
+            owner: FxHashMap::default(),
             styles: FxHashMap::default(),
             templates: FxHashMap::default(),
         }
@@ -175,16 +159,8 @@ impl MutationWriter {
                 self.el_to_node[el.0] = None;
             }
         }
-        // Unlink from whatever owns `nid`, and drop the `bound` entry if this
-        // was a template interior — otherwise a later clone of the same
-        // template at the same path would hand back a dead id.
-        match self.location.remove(&nid) {
-            Some(Location::Root { parent: Some(p) }) => self.unlink(p, nid),
-            Some(Location::InTemplate { root, path }) => {
-                self.bound.remove(&(root, path));
-                self.unlink(root, nid);
-            }
-            Some(Location::Root { parent: None }) | None => {}
+        if let Some(owner) = self.owner.remove(&nid) {
+            self.unlink(owner, nid);
         }
         self.styles.remove(&nid);
         self.children.remove(&nid);
@@ -222,30 +198,30 @@ impl MutationWriter {
     /// Record that `n` hangs off `owner` for the purposes of subtree
     /// forgetting, moving it out of any previous owner's list first.
     ///
-    /// "Owner" is not quite "DOM parent": a template interior is owned by its
-    /// clone *root*, because the root is the only id a `Remove` can name for
-    /// that subtree. Nodes inserted under an interior are owned by the
-    /// interior, so the chain root → interior → inserted still walks.
-    ///
-    /// Must run before `location` is updated — it reads the old location to
-    /// find the previous owner.
+    /// "Owner" is not "DOM parent" — the writer does not know parents and no
+    /// longer needs to. It is "the node whose `Remove` also frees `n`": a
+    /// template interior is owned by its clone *root*, because the root is
+    /// the only id a `Remove` can name for that subtree; an appended node by
+    /// the parent Dioxus named; and a node inserted before/after an anchor,
+    /// or replacing one, by that anchor's own owner, since the anchor's
+    /// siblings are freed by whatever frees the anchor.
     fn link(&mut self, n: NodeId, owner: NodeId) {
-        match self.location.get(&n) {
-            Some(Location::Root { parent: Some(p) }) if *p == owner => return,
-            Some(Location::Root { parent: Some(p) }) => {
-                let p = *p;
-                self.unlink(p, n);
-            }
-            Some(Location::InTemplate { root, .. }) => {
-                let root = *root;
-                if root == owner {
-                    return;
-                }
-                self.unlink(root, n);
-            }
-            Some(Location::Root { parent: None }) | None => {}
+        match self.owner.get(&n) {
+            Some(&prev) if prev == owner => return,
+            Some(&prev) => self.unlink(prev, n),
+            None => {}
         }
+        self.owner.insert(n, owner);
         self.children.entry(owner).or_default().push(n);
+    }
+
+    /// The owner to attribute nodes placed relative to `anchor` to. `None`
+    /// for an anchor the writer never saw placed (the mount root has no
+    /// owner), in which case the new nodes are simply not tracked for
+    /// subtree forgetting — they are not reachable from any `Remove`'s
+    /// subtree either.
+    fn owner_of(&self, anchor: NodeId) -> Option<NodeId> {
+        self.owner.get(&anchor).copied()
     }
 
     fn intern(&mut self, s: &str) -> StrRef {
@@ -256,47 +232,17 @@ impl MutationWriter {
         s.map(|s| self.intern(s))
     }
 
-    /// Give the interior template node at `(root, path)` an id, emitting a
-    /// `bind-path` for it if it does not have one yet.
-    ///
-    /// This is the lazy half of parent resolution: Dioxus only names the
-    /// template interiors it needs (dynamic attributes, dynamic nodes), so an
-    /// unnamed ancestor of a named node has no id until something — here, an
-    /// `insert-before` under it — asks for one.
+    /// Give the interior template node at `(root, path)` a fresh id and
+    /// emit the `bind-path` naming it. Dioxus names each interior it needs
+    /// once per clone (`assign_node_id`, and `replace_placeholder_with_nodes`
+    /// for placeholders it never gave an ElementId — dioxus-core-0.7.10
+    /// src/diff/node.rs:776 and :871 are disjoint sets), so there is nothing
+    /// to memoize.
     fn bind_interior(&mut self, root: NodeId, path: &[u8]) -> NodeId {
-        if let Some(&nid) = self.bound.get(&(root, path.to_vec())) {
-            return nid;
-        }
         let nid = self.ids.alloc();
         self.batch.bind_path(root, path, nid);
-        self.bound.insert((root, path.to_vec()), nid);
         self.link(nid, root);
-        self.location.insert(
-            nid,
-            Location::InTemplate {
-                root,
-                path: path.to_vec(),
-            },
-        );
         nid
-    }
-
-    /// The parent `insert-before` must name for a node the DOM would have
-    /// found by itself.
-    fn parent_of(&mut self, n: NodeId) -> NodeId {
-        match self.location.get(&n).cloned() {
-            Some(Location::Root { parent }) => parent.unwrap_or_else(|| {
-                panic!("writer: node {n} has no parent yet; cannot resolve insert-before")
-            }),
-            Some(Location::InTemplate { root, path }) => {
-                if path.len() <= 1 {
-                    root
-                } else {
-                    self.bind_interior(root, &path[..path.len() - 1])
-                }
-            }
-            None => panic!("writer: node {n} has no recorded location"),
-        }
     }
 
     /// Pop the `m` nodes Dioxus just pushed, in the order it created them.
@@ -305,23 +251,48 @@ impl MutationWriter {
         self.stack.split_off(at)
     }
 
-    /// Insert `nodes` under `parent` before `anchor`, recording the new
-    /// parentage.
-    fn insert(&mut self, parent: NodeId, nodes: &[NodeId], anchor: Option<NodeId>) {
-        for &n in nodes {
-            self.batch.insert_before(parent, n, anchor);
-            self.link(n, parent);
-            self.location.insert(
-                n,
-                Location::Root {
-                    parent: Some(parent),
-                },
-            );
+    /// The registration Dioxus's add/remove listener pair share.
+    ///
+    /// The target is always a node: `Listener.target`'s other case, `Global`
+    /// (`window` / `document`), has no Dioxus counterpart. `WriteMutations`
+    /// only ever names an `ElementId`, and dioxus-html's global-ish events
+    /// (`onresize`, `onvisible`) are receiver-synthesized per element, not
+    /// window registrations. A Dioxus producer therefore never emits a
+    /// `Global` listener — see docs/design.md "Events" → global listeners,
+    /// where the frameworks that do need them are Dominator and Leptos.
+    fn listener(&mut self, name: &'static str, id: ElementId) -> proto::Listener {
+        let nid = self.node(id);
+        let slot = self.intern(name);
+        proto::Listener {
+            target: Some(proto::listener::Target::Id(nid)),
+            name: slot,
+            // The receiver delegates bubbling events at the mount root and
+            // attaches non-bubbling ones per element, so it needs the
+            // producer's verdict (proto/stream-dom.proto `Listener`).
+            bubbles: dioxus_core_types::event_bubbles(name),
+            capture: false,
+            passive: false,
+            // Dioxus handlers call `prevent_default` imperatively, which the
+            // driver relays through `dom-event`; there is no declarative
+            // verdict to publish at registration time.
+            prevent_default: false,
+            stop_propagation: false,
         }
     }
 
-    /// The `NodeId` of the placeholder at `path` under the current stack top,
-    /// binding it if this is the first time it has been named.
+    /// Insert `nodes` before `anchor`, which implies the parent on the wire.
+    fn insert_before(&mut self, nodes: &[NodeId], anchor: NodeId) {
+        let owner = self.owner_of(anchor);
+        for &n in nodes {
+            self.batch.insert_before(None, n, Some(anchor));
+            if let Some(owner) = owner {
+                self.link(n, owner);
+            }
+        }
+    }
+
+    /// The `NodeId` of the node at `path` under the clone root `root`,
+    /// binding it — this is where a template interior gets an id.
     ///
     /// Mirrors `assign_node_id`'s resolution, which the two path-addressed
     /// mutations share (`replace_placeholder_with_nodes` is the other).
@@ -475,9 +446,14 @@ impl MutationWriter {
 
 impl WriteMutations for MutationWriter {
     fn append_children(&mut self, id: ElementId, m: usize) {
+        // The one op whose parent Dioxus states, so the one op that names a
+        // parent on the wire — and it must, since an append has no anchor.
         let parent = self.node(id);
         let nodes = self.pop(m);
-        self.insert(parent, &nodes, None);
+        for n in nodes {
+            self.batch.insert_before(Some(parent), n, None);
+            self.link(n, parent);
+        }
     }
 
     fn assign_node_id(&mut self, path: &'static [u8], id: ElementId) {
@@ -496,14 +472,12 @@ impl WriteMutations for MutationWriter {
     fn create_placeholder(&mut self, id: ElementId) {
         let nid = self.assign(id);
         self.batch.create_placeholder(nid);
-        self.location.insert(nid, Location::Root { parent: None });
         self.stack.push(nid);
     }
 
     fn create_text_node(&mut self, value: &str, id: ElementId) {
         let nid = self.assign(id);
         self.batch.create_text(nid, value);
-        self.location.insert(nid, Location::Root { parent: None });
         self.stack.push(nid);
     }
 
@@ -511,15 +485,13 @@ impl WriteMutations for MutationWriter {
         let tmpl = self.template_id(template);
         let nid = self.assign(id);
         self.batch.clone_template(tmpl, index as u32, nid);
-        self.location.insert(nid, Location::Root { parent: None });
         self.stack.push(nid);
     }
 
     fn replace_node_with(&mut self, id: ElementId, m: usize) {
         let old = self.node(id);
         let nodes = self.pop(m);
-        let parent = self.parent_of(old);
-        self.insert(parent, &nodes, Some(old));
+        self.insert_before(&nodes, old);
         self.batch.remove(old);
         self.forget_subtree(old);
     }
@@ -534,41 +506,35 @@ impl WriteMutations for MutationWriter {
             .stack
             .last()
             .expect("writer: replace_placeholder_with_nodes on an empty stack");
+        // Naming the placeholder is Dioxus naming it: the clone's interiors
+        // have no ids until something asks, and this op addresses one by
+        // path. The binding stays; only parent reconstruction went away.
         let old = self.resolve_path(root, path);
-        let parent = self.parent_of(old);
-        self.insert(parent, &nodes, Some(old));
+        self.insert_before(&nodes, old);
         self.batch.remove(old);
-        // `forget_subtree` drops the `bound` entry for `(root, path)` itself,
-        // since the placeholder's own `location` records it.
         self.forget_subtree(old);
     }
 
     fn insert_nodes_after(&mut self, id: ElementId, m: usize) {
-        // FRICTION (reported to the design record): the protocol has only
-        // `insert-before`, and the anchor this needs is `id`'s *next
-        // sibling*, which the producer does not know — the shadow tracks
-        // parentage, not sibling order. Rather than carry a fully ordered
-        // shadow tree (a child list per node, maintained on every insert,
-        // move and remove) for this one op, insert the new nodes *before*
-        // `id` and then move `id` back in front of them with one extra
-        // `insert-before`. Net effect is identical; cost is one extra move op
-        // per insert-after, and a receiver preferring `moveBefore` keeps the
-        // moved node's state.
         let anchor = self.node(id);
         let nodes = self.pop(m);
-        if nodes.is_empty() {
-            return;
+        let owner = self.owner_of(anchor);
+        // Chained, because each node goes after the previous one: "after the
+        // anchor" for all of them would reverse the order.
+        let mut prev = anchor;
+        for n in nodes {
+            self.batch.insert_after(None, n, prev);
+            if let Some(owner) = owner {
+                self.link(n, owner);
+            }
+            prev = n;
         }
-        let parent = self.parent_of(anchor);
-        self.insert(parent, &nodes, Some(anchor));
-        self.batch.insert_before(parent, anchor, Some(nodes[0]));
     }
 
     fn insert_nodes_before(&mut self, id: ElementId, m: usize) {
         let anchor = self.node(id);
         let nodes = self.pop(m);
-        let parent = self.parent_of(anchor);
-        self.insert(parent, &nodes, Some(anchor));
+        self.insert_before(&nodes, anchor);
     }
 
     fn set_attribute(
@@ -691,37 +657,13 @@ impl WriteMutations for MutationWriter {
     }
 
     fn create_event_listener(&mut self, name: &'static str, id: ElementId) {
-        let nid = self.node(id);
-        let slot = self.intern(name);
-        self.batch.add_listener(proto::Listener {
-            id: nid,
-            name: slot,
-            // The receiver delegates bubbling events at the mount root and
-            // attaches non-bubbling ones per element, so it needs the
-            // producer's verdict (proto/stream-dom.proto `Listener`).
-            bubbles: dioxus_core_types::event_bubbles(name),
-            capture: false,
-            passive: false,
-            // Dioxus handlers call `prevent_default` imperatively, which the
-            // driver relays through `dom-event`; there is no declarative
-            // verdict to publish at registration time.
-            prevent_default: false,
-            stop_propagation: false,
-        });
+        let l = self.listener(name, id);
+        self.batch.add_listener(l);
     }
 
     fn remove_event_listener(&mut self, name: &'static str, id: ElementId) {
-        let nid = self.node(id);
-        let slot = self.intern(name);
-        self.batch.remove_listener(proto::Listener {
-            id: nid,
-            name: slot,
-            bubbles: dioxus_core_types::event_bubbles(name),
-            capture: false,
-            passive: false,
-            prevent_default: false,
-            stop_propagation: false,
-        });
+        let l = self.listener(name, id);
+        self.batch.remove_listener(l);
     }
 
     fn remove_node(&mut self, id: ElementId) {

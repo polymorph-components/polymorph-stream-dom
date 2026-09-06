@@ -27,6 +27,7 @@ import type {
 import type {
   FrameSink,
   Listener,
+  ListenerTarget,
   PropertyValue,
   TemplateNode,
 } from "./frames.ts";
@@ -50,9 +51,15 @@ interface ShadowNode {
   attached: boolean;
 }
 
-/** Registered listeners for one node, keyed by the interned event-name ref
- * (`Listener.name`) so add/remove find the same entry. */
+/** Registered listeners for one target (a node, or a global singleton),
+ * keyed by the interned event-name ref (`Listener.name`) so add/remove
+ * find the same entry. */
 type ListenerMap = Map<number, Listener>;
+
+/** `ListenerTarget` narrowed to its two global cases, and the key
+ * `#globalListeners` uses for them — the two are not the "global" oneof
+ * case number, just this class's own bookkeeping key. */
+type GlobalKind = "window" | "document";
 
 /** A registered template: the flat arena plus its declared root indices,
  * as `register-template` sent them (docs/design.md "Templates are core,
@@ -103,12 +110,14 @@ export class RemoteDomTranscoder implements FrameSink {
   #templates = new Map<number, Template>();
   #ridCounter = 0;
   #records: RemoteMutationRecord[] = [];
-  #listeners = new Map<number, ListenerMap>();
+  #nodeListeners = new Map<number, ListenerMap>();
+  #globalListeners = new Map<GlobalKind, ListenerMap>();
   /** Listener adds/removes captured this batch, drained by `mount.ts`'s
    * `onCommit` hook after `commit()`'s `mutate` call (nodes only exist in
-   * the real DOM once `mutate` has run). */
-  pendingAttach: Array<{ id: number; listener: Listener }> = [];
-  pendingDetach: Array<{ id: number; listener: Listener }> = [];
+   * the real DOM once `mutate` has run — globals need no such wait, but
+   * are queued the same way for one code path). */
+  pendingAttach: Array<{ target: ListenerTarget; listener: Listener }> = [];
+  pendingDetach: Array<{ target: ListenerTarget; listener: Listener }> = [];
   onCommit: (() => void) | undefined;
 
   constructor(connection: RemoteConnection) {
@@ -231,35 +240,67 @@ export class RemoteDomTranscoder implements FrameSink {
 
   // -- tree ops -----------------------------------------------------------
 
-  insertBefore(
-    parentId: number,
-    id: number,
+  /** Resolve the parent for `insertBefore`/`insertAfter`, per the proto's
+   * presence rule (proto/stream-dom.proto `InsertBefore`/`InsertAfter`
+   * doc): `parent` is required without an `anchor` and optional with one
+   * (the anchor's CURRENT shadow parent is then implied, as in the DOM);
+   * a frame with neither is a protocol error. When both are given and the
+   * anchor already has a shadow parent that differs from the explicit
+   * one, that is a producer bug — thrown, not silently resolved either
+   * way. */
+  #resolveInsertParent(
+    opName: string,
+    parentId: number | undefined,
     anchorId: number | undefined,
-  ): void {
-    // "anchor === id stays a no-op" — inserting a node before itself names
-    // no real change of position.
-    if (anchorId === id) return;
-
-    const parent = this.#resolve(parentId);
-    const node = this.#resolve(id);
-
-    // Index against the shadow BEFORE detaching — matches
-    // DOMRemoteReceiver's `parent.insertBefore(attach(child),
-    // parent.childNodes[index] || null)`, which reads `childNodes[index]`
-    // before the move happens, i.e. against the CURRENT (pre-move) DOM.
-    const anchorIndexBeforeDetach = (aid: number): number => {
-      const idx = parent.children.indexOf(this.#resolve(aid));
-      if (idx === -1) {
-        throw new Error(
-          `stream-dom: insert-before anchor ${aid} is not a child of parent ${parentId}`,
-        );
+  ): ShadowNode {
+    if (parentId === undefined && anchorId === undefined) {
+      throw new Error(`stream-dom: ${opName} has neither parent nor anchor`);
+    }
+    if (parentId !== undefined) {
+      const explicit = this.#resolve(parentId);
+      if (anchorId !== undefined) {
+        const anchor = this.#resolve(anchorId);
+        if (anchor.parent && anchor.parent !== explicit) {
+          throw new Error(
+            `stream-dom: ${opName} parent ${parentId} disagrees with anchor ${anchorId}'s current parent`,
+          );
+        }
       }
-      return idx;
-    };
-    const recordIndex = anchorId === undefined
-      ? parent.children.length
-      : anchorIndexBeforeDetach(anchorId);
+      return explicit;
+    }
+    // `parentId` is undefined here, so the first check guarantees
+    // `anchorId` is defined.
+    const anchor = this.#resolve(anchorId!);
+    if (!anchor.parent) {
+      throw new Error(
+        `stream-dom: ${opName} anchor ${anchorId} has no parent to imply (parent was omitted)`,
+      );
+    }
+    return anchor.parent;
+  }
 
+  /** Shared move/attach/detach bookkeeping for `insertBefore` and
+   * `insertAfter` — the ~40 lines both ops need beyond computing WHERE the
+   * node lands, which is the only thing that differs between them.
+   *
+   * `recordIndex` is the position for the wire record, computed by the
+   * caller BEFORE any detaching (matches DOMRemoteReceiver reading
+   * `parent.childNodes[index]` before the move happens, i.e. against the
+   * CURRENT pre-move DOM). `shadowIndexOf` is called AFTER `node` has been
+   * spliced out of its old shadow parent (if any) and must recompute the
+   * insertion point from whatever anchor the caller cares about: a same-
+   * parent move shifts every later index down by one once the moved node
+   * is removed, so reusing `recordIndex` for the shadow (rather than
+   * re-deriving it post-detach) would land the shadow one slot off from
+   * what the emitted record actually does to the real DOM (this is what
+   * B1 fixed for insert-before; insert-after's same-parent move needs the
+   * identical treatment). */
+  #insertAt(
+    parent: ShadowNode,
+    node: ShadowNode,
+    recordIndex: number,
+    shadowIndexOf: () => number,
+  ): void {
     const wasAttached = node.attached;
     const oldParent = node.parent;
     // The old parent's index for a REMOVE_CHILD, if this move detaches an
@@ -274,17 +315,7 @@ export class RemoteDomTranscoder implements FrameSink {
     }
     node.parent = parent;
 
-    // Recompute the shadow's insertion index AFTER detaching: a same-
-    // parent forward move (detaching a node that sat BEFORE the anchor)
-    // shifts every later index down by one, so the pre-detach
-    // `recordIndex` (correct for the wire record, which describes the
-    // DOM's state before this op) would land the shadow one slot late.
-    // Re-deriving the index from the anchor's position in the
-    // now-detached array keeps the shadow's child order equal to what
-    // `insertBefore` actually produces in the real DOM.
-    const shadowIndex = anchorId === undefined
-      ? parent.children.length
-      : parent.children.indexOf(this.#resolve(anchorId));
+    const shadowIndex = shadowIndexOf();
     parent.children.splice(shadowIndex, 0, node);
 
     if (!parent.attached) {
@@ -322,6 +353,83 @@ export class RemoteDomTranscoder implements FrameSink {
         recordIndex,
       ]);
     }
+  }
+
+  insertBefore(
+    parentId: number | undefined,
+    id: number,
+    anchorId: number | undefined,
+  ): void {
+    // "anchor === id stays a no-op" — inserting a node before itself names
+    // no real change of position.
+    if (anchorId === id) return;
+
+    const parent = this.#resolveInsertParent(
+      "insert-before",
+      parentId,
+      anchorId,
+    );
+    const node = this.#resolve(id);
+
+    // Index against the shadow BEFORE detaching — matches
+    // DOMRemoteReceiver's `parent.insertBefore(attach(child),
+    // parent.childNodes[index] || null)`, which reads `childNodes[index]`
+    // before the move happens, i.e. against the CURRENT (pre-move) DOM.
+    const anchorIndexBeforeDetach = (aid: number): number => {
+      const idx = parent.children.indexOf(this.#resolve(aid));
+      if (idx === -1) {
+        throw new Error(
+          `stream-dom: insert-before anchor ${aid} is not a child of the resolved parent`,
+        );
+      }
+      return idx;
+    };
+    const recordIndex = anchorId === undefined
+      ? parent.children.length
+      : anchorIndexBeforeDetach(anchorId);
+
+    this.#insertAt(
+      parent,
+      node,
+      recordIndex,
+      () =>
+        anchorId === undefined
+          ? parent.children.length
+          : parent.children.indexOf(this.#resolve(anchorId)),
+    );
+  }
+
+  insertAfter(
+    parentId: number | undefined,
+    id: number,
+    anchorId: number,
+  ): void {
+    // Symmetric with insert-before's "anchor === id" no-op: inserting a
+    // node after itself names no real change of position.
+    if (anchorId === id) return;
+
+    const parent = this.#resolveInsertParent(
+      "insert-after",
+      parentId,
+      anchorId,
+    );
+    const node = this.#resolve(id);
+    const anchor = this.#resolve(anchorId);
+
+    const anchorIndexBeforeDetach = parent.children.indexOf(anchor);
+    if (anchorIndexBeforeDetach === -1) {
+      throw new Error(
+        `stream-dom: insert-after anchor ${anchorId} is not a child of the resolved parent`,
+      );
+    }
+    const recordIndex = anchorIndexBeforeDetach + 1;
+
+    this.#insertAt(
+      parent,
+      node,
+      recordIndex,
+      () => parent.children.indexOf(anchor) + 1,
+    );
   }
 
   remove(id: number): void {
@@ -406,24 +514,38 @@ export class RemoteDomTranscoder implements FrameSink {
   // -- listeners: recorded, not remote-dom properties (see class doc) -----
 
   addListener(listener: Listener): void {
-    const map = this.#listenersFor(listener.id);
+    const map = this.#listenersFor(listener.target);
     map.set(listener.name, listener);
-    this.pendingAttach.push({ id: listener.id, listener });
+    this.pendingAttach.push({ target: listener.target, listener });
   }
 
   removeListener(listener: Listener): void {
-    const map = this.#listeners.get(listener.id);
+    const map = this.#existingListenersFor(listener.target);
     map?.delete(listener.name);
-    this.pendingDetach.push({ id: listener.id, listener });
+    this.pendingDetach.push({ target: listener.target, listener });
   }
 
-  #listenersFor(id: number): ListenerMap {
-    let map = this.#listeners.get(id);
+  #listenersFor(target: ListenerTarget): ListenerMap {
+    if (target.kind === "node") {
+      let map = this.#nodeListeners.get(target.id);
+      if (!map) {
+        map = new Map();
+        this.#nodeListeners.set(target.id, map);
+      }
+      return map;
+    }
+    let map = this.#globalListeners.get(target.kind);
     if (!map) {
       map = new Map();
-      this.#listeners.set(id, map);
+      this.#globalListeners.set(target.kind, map);
     }
     return map;
+  }
+
+  #existingListenersFor(target: ListenerTarget): ListenerMap | undefined {
+    return target.kind === "node"
+      ? this.#nodeListeners.get(target.id)
+      : this.#globalListeners.get(target.kind);
   }
 
   // -- templates ------------------------------------------------------------
@@ -596,7 +718,7 @@ export class RemoteDomTranscoder implements FrameSink {
    * dispatch walk uses this to find the nearest ancestor with a
    * registration. */
   listenerFor(id: number, nameRef: number): Listener | undefined {
-    return this.#listeners.get(id)?.get(nameRef);
+    return this.#nodeListeners.get(id)?.get(nameRef);
   }
 
   // -- commit ---------------------------------------------------------------

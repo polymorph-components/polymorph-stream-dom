@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { FrameDecoder } from "../src/frames.ts";
+import { Writer } from "../src/proto.ts";
 import type {
   FrameSink,
   Listener,
@@ -14,9 +15,15 @@ type Call =
   | { op: "createPlaceholder"; id: number }
   | {
     op: "insertBefore";
-    parent: number;
+    parent: number | undefined;
     id: number;
     anchor: number | undefined;
+  }
+  | {
+    op: "insertAfter";
+    parent: number | undefined;
+    id: number;
+    anchor: number;
   }
   | { op: "remove"; id: number }
   | { op: "setText"; id: number; text: string }
@@ -55,8 +62,15 @@ class RecordingSink implements FrameSink {
   createPlaceholder(id: number): void {
     this.calls.push({ op: "createPlaceholder", id });
   }
-  insertBefore(parent: number, id: number, anchor: number | undefined): void {
+  insertBefore(
+    parent: number | undefined,
+    id: number,
+    anchor: number | undefined,
+  ): void {
     this.calls.push({ op: "insertBefore", parent, id, anchor });
+  }
+  insertAfter(parent: number | undefined, id: number, anchor: number): void {
+    this.calls.push({ op: "insertAfter", parent, id, anchor });
   }
   remove(id: number): void {
     this.calls.push({ op: "remove", id });
@@ -100,8 +114,12 @@ class RecordingSink implements FrameSink {
 
 // crates/stream-dom-guest/fixtures/basic.pb + basic.txt: the cross-check
 // corpus from the Rust producer side (docs/design.md open question 7,
-// "Conformance corpus"). basic.txt's 11 `Frame { ... }` lines are the
-// expected decode.
+// "Conformance corpus"). basic.txt's 17 `Frame { ... }` lines are the
+// expected decode. prost prints `Listener.target` LAST regardless of the
+// proto's field order (`target` is field 1/8, `name` is field 2, etc.) —
+// decode is keyed on field number, not textual position, so this is a
+// non-issue for the decoder; noted because it looks surprising reading
+// basic.txt side by side with the .proto.
 const fixtureDir = new URL(
   "../../crates/stream-dom-guest/fixtures/",
   import.meta.url,
@@ -111,43 +129,62 @@ async function loadFixture(): Promise<Uint8Array> {
   return await Deno.readFile(new URL("basic.pb", fixtureDir));
 }
 
-Deno.test("FrameDecoder decodes basic.pb into basic.txt's 11 frames", async () => {
+Deno.test("FrameDecoder decodes basic.pb into basic.txt's 17 frames", async () => {
   const bytes = await loadFixture();
   const sink = new RecordingSink();
   const decoder = new FrameDecoder(sink);
   decoder.push(bytes);
 
   const calls = sink.calls;
-  assertEquals(calls.length, 12); // 11 frames' ops, plus the trailing commit()
+  assertEquals(calls.length, 18); // 17 frames' ops, plus the trailing commit()
 
   assertEquals(calls[0], { op: "internString", id: 1, s: "div" });
   assertEquals(calls[1], { op: "internString", id: 2, s: "click" });
   assertEquals(calls[2], { op: "internString", id: 3, s: "class" });
-  assertEquals(calls[3], { op: "createElement", id: 1, tag: 1, ns: undefined });
-  assertEquals(calls[4], { op: "createText", id: 2, text: "hello" });
-  assertEquals(calls[5], {
+  assertEquals(calls[3], { op: "internString", id: 4, s: "hashchange" });
+  assertEquals(calls[4], { op: "createElement", id: 1, tag: 1, ns: undefined });
+  assertEquals(calls[5], { op: "createText", id: 2, text: "hello" });
+  assertEquals(calls[6], {
     op: "insertBefore",
     parent: 0,
     id: 1,
     anchor: undefined,
   });
-  assertEquals(calls[6], {
+  assertEquals(calls[7], {
     op: "insertBefore",
     parent: 1,
     id: 2,
     anchor: undefined,
   });
-  assertEquals(calls[7], {
+  assertEquals(calls[8], { op: "createText", id: 3, text: "!" });
+  // InsertAfter { parent: None, id: 3, anchor: 2 } — parent implied from
+  // anchor 2's current shadow parent (node 1).
+  assertEquals(calls[9], {
+    op: "insertAfter",
+    parent: undefined,
+    id: 3,
+    anchor: 2,
+  });
+  assertEquals(calls[10], { op: "createText", id: 4, text: "?" });
+  // InsertBefore { parent: None, id: 4, anchor: Some(3) } — parent implied
+  // from anchor 3's current shadow parent, likewise node 1.
+  assertEquals(calls[11], {
+    op: "insertBefore",
+    parent: undefined,
+    id: 4,
+    anchor: 3,
+  });
+  assertEquals(calls[12], {
     op: "setAttribute",
     id: 1,
     name: 3,
     ns: undefined,
     value: "greeting",
   });
-  assertEquals(calls[8], {
+  assertEquals(calls[13], {
     op: "addListener",
     listener: {
-      id: 1,
+      target: { kind: "node", id: 1 },
       name: 2,
       bubbles: true,
       capture: false,
@@ -156,11 +193,24 @@ Deno.test("FrameDecoder decodes basic.pb into basic.txt's 11 frames", async () =
       stopPropagation: false,
     },
   });
-  assertEquals(calls[9], { op: "setText", id: 2, text: "hello, world" });
-  // Frame 11: commit=true, op=Remove{id:2} — op applied before commit is
+  // Listener { name: 4 ("hashchange"), target: Global(Window) }.
+  assertEquals(calls[14], {
+    op: "addListener",
+    listener: {
+      target: { kind: "window" },
+      name: 4,
+      bubbles: false,
+      capture: false,
+      passive: false,
+      preventDefault: false,
+      stopPropagation: false,
+    },
+  });
+  assertEquals(calls[15], { op: "setText", id: 2, text: "hello, world" });
+  // Frame 17: commit=true, op=Remove{id:2} — op applied before commit is
   // honored (docs/design.md "Batches are framed by a `commit` flag").
-  assertEquals(calls[10], { op: "remove", id: 2 });
-  assertEquals(calls[11], { op: "commit" });
+  assertEquals(calls[16], { op: "remove", id: 2 });
+  assertEquals(calls[17], { op: "commit" });
 });
 
 Deno.test("FrameDecoder handles a frame straddling arbitrary chunk boundaries (byte-by-byte)", async () => {
@@ -169,10 +219,28 @@ Deno.test("FrameDecoder handles a frame straddling arbitrary chunk boundaries (b
   const decoder = new FrameDecoder(sink);
   for (const byte of bytes) decoder.push(Uint8Array.of(byte));
 
-  assertEquals(sink.calls.length, 12); // 11 ops + the trailing commit
+  assertEquals(sink.calls.length, 18); // 17 ops + the trailing commit
   assertEquals(sink.calls[0], { op: "internString", id: 1, s: "div" });
-  assertEquals(sink.calls[10], { op: "remove", id: 2 });
-  assertEquals(sink.calls[11], { op: "commit" });
+  assertEquals(sink.calls[9], {
+    op: "insertAfter",
+    parent: undefined,
+    id: 3,
+    anchor: 2,
+  });
+  assertEquals(sink.calls[14], {
+    op: "addListener",
+    listener: {
+      target: { kind: "window" },
+      name: 4,
+      bubbles: false,
+      capture: false,
+      passive: false,
+      preventDefault: false,
+      stopPropagation: false,
+    },
+  });
+  assertEquals(sink.calls[16], { op: "remove", id: 2 });
+  assertEquals(sink.calls[17], { op: "commit" });
 });
 
 Deno.test("FrameDecoder throws (does not silently wait forever) on a malformed length varint", () => {
@@ -184,4 +252,46 @@ Deno.test("FrameDecoder throws (does not silently wait forever) on a malformed l
   // amount of additional bytes fixes a malformed value already buffered).
   const malformed = Uint8Array.of(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00);
   assertThrows(() => decoder.push(malformed));
+});
+
+// Global.DOCUMENT (value 1) isn't exercised by basic.pb (which only uses
+// WINDOW), so hand-encode a frame for it: Frame.add_listener (field 12) ->
+// AddListener.listener (field 1) -> Listener.global (field 8, enum varint).
+Deno.test("FrameDecoder decodes Listener.target = Global(DOCUMENT)", () => {
+  const inner = new Writer();
+  inner.writeBool(1, false); // Frame.commit
+  inner.writeMessage(12, (addListenerW) => {
+    addListenerW.writeMessage(1, (listenerW) => {
+      listenerW.writeUint32(8, 1); // Global.DOCUMENT = 1
+      listenerW.writeUint32(2, 42); // Listener.name
+    });
+  });
+  const frameBytes = inner.finish();
+
+  const lengthPrefix = new Writer();
+  lengthPrefix.writeVarint32(frameBytes.length);
+  const framed = new Uint8Array(
+    lengthPrefix.finish().length + frameBytes.length,
+  );
+  framed.set(lengthPrefix.finish(), 0);
+  framed.set(frameBytes, lengthPrefix.finish().length);
+
+  const sink = new RecordingSink();
+  const decoder = new FrameDecoder(sink);
+  decoder.push(framed);
+
+  assertEquals(sink.calls, [
+    {
+      op: "addListener",
+      listener: {
+        target: { kind: "document" },
+        name: 42,
+        bubbles: false,
+        capture: false,
+        passive: false,
+        preventDefault: false,
+        stopPropagation: false,
+      },
+    },
+  ]);
 });

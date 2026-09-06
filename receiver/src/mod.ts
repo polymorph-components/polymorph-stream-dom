@@ -5,6 +5,7 @@ export { FrameDecoder } from "./frames.ts";
 export type {
   FrameSink,
   Listener,
+  ListenerTarget,
   PropertyValue,
   TemplateAttr,
   TemplateElement,

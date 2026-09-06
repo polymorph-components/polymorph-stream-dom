@@ -62,7 +62,8 @@ message Frame {
     RemoveListener remove_listener = 13;
     Intern intern = 14;
     RegisterTemplate register_template = 15;
-    BindMarker bind_marker = 16;
+    InsertAfter insert_after = 16;
+    BindMarker bind_marker = 17;
   }
 }
 
@@ -91,14 +92,30 @@ message CreatePlaceholder {
   uint32 id = 1;
 }
 
-// Insert `id` under `parent` before `anchor`; no `anchor` appends. Moving
-// an already-inserted node is allowed and is exactly what the DOM's
-// insertBefore does; receivers prefer moveBefore where available so the
-// move preserves node state.
+// Insert `id` before `anchor`, or append it to `parent` when there is no
+// `anchor`. `parent` is required without an `anchor` and optional with
+// one (the anchor's parent is then implied, as in the DOM's insertBefore);
+// a frame with neither is an error. Producers whose renderer never names
+// a parent (Dioxus) omit it; a coalescer keys the op on the anchor's
+// subtree. Moving an already-inserted node is allowed and is exactly what
+// the DOM's insertBefore does; receivers prefer moveBefore where
+// available so the move preserves node state.
 message InsertBefore {
-  uint32 parent = 1;
+  optional uint32 parent = 1;
   uint32 id = 2;
   optional uint32 anchor = 3;
+}
+
+// Insert `id` immediately after `anchor` (under `parent`, which is
+// optional and implied by the anchor). The DOM has no insertAfter, but
+// diffing renderers emit "insert after this sibling" for list appends,
+// and without this op a producer either tracks every node's next sibling
+// or moves the anchor around the new nodes. Same move semantics as
+// InsertBefore.
+message InsertAfter {
+  optional uint32 parent = 1;
+  uint32 id = 2;
+  uint32 anchor = 3;
 }
 
 message Remove {
@@ -133,15 +150,28 @@ message SetProperty {
   }
 }
 
+// The two receiver-side singletons a producer can listen on without
+// creating them. Frameworks register `popstate`, `hashchange`, `resize`,
+// `visibilitychange`, media-query and global keyboard listeners here, and
+// nothing in the tree under the mount root stands in for them.
+enum Global {
+  WINDOW = 0;
+  DOCUMENT = 1;
+}
+
 // Listener registration.
 //
-// `bubbles` is the producer's verdict for this event name; the receiver
-// delegates bubbling events at the mount root and attaches non-bubbling
-// ones per element, and needs the same bit on removal. `prevent_default` /
-// `stop_propagation` are the declarative path a remote receiver can honor
-// without a round trip; see docs/design.md "Events".
+// The target is a node id or a global. `bubbles` is the producer's
+// verdict for this event name; the receiver delegates bubbling events at
+// the mount root and attaches non-bubbling ones per element (globals are
+// always attached directly), and needs the same bit on removal.
+// `prevent_default` / `stop_propagation` are the declarative path a remote
+// receiver can honor without a round trip; see docs/design.md "Events".
 message Listener {
-  uint32 id = 1;
+  oneof target {
+    uint32 id = 1;
+    Global global = 8;
+  }
   uint32 name = 2;
   bool bubbles = 3;
   bool capture = 4;

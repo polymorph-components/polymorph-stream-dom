@@ -682,6 +682,17 @@ impl JsObject for EventData {
                 }
             }
 
+            // --- HashChangeEvent ---
+            //
+            // The `navigation` family's one field is `location.href` after
+            // the navigation, snapshotted by the receiver because a
+            // producer has no `location` (proto/stream-dom-events.proto,
+            // `NavigationData`). The URL *before* it is not carried:
+            // nothing needs it that could not keep its own last value, and
+            // carrying it would make the receiver track history to answer.
+            "newURL" => JsValue::from_str(self.navigation_href()),
+            "oldURL" => JsValue::from_str(""),
+
             // --- Modifiers, shared by the mouse, key and touch families ---
             "altKey" => JsValue::from_bool(self.modifiers().alt),
             "ctrlKey" => JsValue::from_bool(self.modifiers().ctrl),

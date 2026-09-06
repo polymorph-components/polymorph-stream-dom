@@ -15,7 +15,7 @@ import { DOMRemoteReceiver } from "@remote-dom/core/receivers";
 import { DispatchGate } from "./dispatch.ts";
 import { encodePayload } from "./events.ts";
 import { FrameDecoder } from "./frames.ts";
-import type { Listener } from "./frames.ts";
+import type { Listener, ListenerTarget } from "./frames.ts";
 import { RemoteDomTranscoder } from "./remote.ts";
 
 export interface MountOptions {
@@ -89,6 +89,23 @@ type ElementLike = Element & {
 
 function isNum(v: unknown): v is number {
   return typeof v === "number";
+}
+
+/** wit `event-target` (wit/stream-dom.wit `types.event-target`), the
+ * shape `handle-event`'s `target` param lowers as (embedder-api.md "Value
+ * mapping": a payload-carrying variant case is `{ kind, value }`, a
+ * payload-less one is `{ kind }` with `value` absent). Built from a
+ * `ListenerTarget` (frames.ts's own decode of `Listener.target`) at
+ * dispatch time. */
+type WitEventTarget =
+  | { kind: "node"; value: number }
+  | { kind: "window" }
+  | { kind: "document" };
+
+function witTarget(target: ListenerTarget): WitEventTarget {
+  return target.kind === "node"
+    ? { kind: "node", value: target.id }
+    : { kind: target.kind };
 }
 
 /**
@@ -198,7 +215,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
   const exports_: { handleEvent?: (...a: unknown[]) => unknown } = {};
 
   function fire(
-    id: number,
+    target: WitEventTarget,
     nameRef: number,
     name: string,
     ev: Event,
@@ -212,7 +229,9 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     if (!exports_.handleEvent || disposed) return;
     const payload = encodePayload(name, ev);
     const domEvent = new DomEvent(ev);
-    gate.dispatch(() => exports_.handleEvent!(id, nameRef, payload, domEvent));
+    gate.dispatch(() =>
+      exports_.handleEvent!(target, nameRef, payload, domEvent)
+    );
   }
 
   function dispatchDelegated(name: string, ev: Event): void {
@@ -224,7 +243,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
       if (id !== undefined) {
         const listener = transcoder.listenerFor(id, nameRef);
         if (listener) {
-          fire(id, nameRef, name, ev, listener);
+          fire({ kind: "node", value: id }, nameRef, name, ev, listener);
           return;
         }
       }
@@ -324,37 +343,55 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     handler: (e: Event) => void;
     capture: boolean;
   }
-  const directListeners = new Map<Node, Map<number, DirectEntry>>();
+  /** Non-delegated listeners: per-node ones (non-bubbling `Listener`s) and
+   * global ones (`window`/`document` — "always attached directly,
+   * regardless of `bubbles`", docs/design.md "Global listeners"), keyed by
+   * the real `EventTarget` — `Node`, `Window` and `Document` all satisfy
+   * that interface uniformly, so one map and one pair of functions serve
+   * both. */
+  const directListeners = new Map<EventTarget, Map<number, DirectEntry>>();
 
   function attachDirectListener(
-    node: Node,
-    id: number,
+    target: EventTarget,
+    witTgt: WitEventTarget,
+    name: string,
     listener: Listener,
   ): void {
-    let byName = directListeners.get(node);
+    let byName = directListeners.get(target);
     if (!byName) {
       byName = new Map();
-      directListeners.set(node, byName);
+      directListeners.set(target, byName);
     }
     if (byName.has(listener.name)) return;
-    const name = transcoder.stringFor(listener.name);
-    const handler = (e: Event) => fire(id, listener.name, name, e, listener);
+    const handler = (e: Event) =>
+      fire(witTgt, listener.name, name, e, listener);
     byName.set(listener.name, { handler, capture: listener.capture });
-    (node as Element).addEventListener(name, handler, {
+    target.addEventListener(name, handler, {
       capture: listener.capture,
       passive: listener.passive,
     });
   }
 
-  function detachDirectListener(node: Node, listener: Listener): void {
-    const byName = directListeners.get(node);
+  function detachDirectListener(target: EventTarget, listener: Listener): void {
+    const byName = directListeners.get(target);
     const entry = byName?.get(listener.name);
     if (!entry) return;
     const name = transcoder.stringFor(listener.name);
-    (node as Element).removeEventListener(name, entry.handler, {
+    target.removeEventListener(name, entry.handler, {
       capture: entry.capture,
     });
     byName!.delete(listener.name);
+  }
+
+  /** Dispatch the synthetic initial-navigation event (docs/design.md
+   * "Global listeners" territory; see mount.ts's dispatch for the full
+   * reasoning): a `window` listener for `hashchange`/`popstate` fires once,
+   * right after it is attached, with the CURRENT `location.href` — the
+   * producer has no `location` to read at mount, so without this a deep
+   * link renders the default route until the first real navigation. Mirrors
+   * the synthetic `mounted` event's "once per registration" contract. */
+  function dispatchSyntheticNavigation(name: string, listener: Listener): void {
+    fire({ kind: "window" }, listener.name, name, new Event(name), listener);
   }
 
   // Nodes only exist in the real DOM once `commit()`'s `mutate` call has
@@ -364,29 +401,55 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     // that landed in the same batch as the insert, ordered before it, or
     // a node briefly unreachable via the receiver's `call`) is carried
     // over to the NEXT `onCommit` rather than dropped — dropping it would
-    // permanently lose that registration even once the node exists.
-    const stillPending: Array<{ id: number; listener: Listener }> = [];
+    // permanently lose that registration even once the node exists. Only
+    // node targets can miss this way; `window`/`document` always resolve.
+    const stillPending: Array<{ target: ListenerTarget; listener: Listener }> =
+      [];
     for (const entry of transcoder.pendingAttach) {
-      const { id, listener } = entry;
-      const node = resolveNode(id);
-      if (!node) {
-        stillPending.push(entry);
+      const { target, listener } = entry;
+      if (target.kind === "node") {
+        const node = resolveNode(target.id);
+        if (!node) {
+          stillPending.push(entry);
+          continue;
+        }
+        nodeToId.set(node, target.id);
+        if (listener.bubbles) {
+          ensureRootListener(listener);
+        } else {
+          const name = transcoder.stringFor(listener.name);
+          attachDirectListener(node, witTarget(target), name, listener);
+        }
         continue;
       }
-      nodeToId.set(node, id);
-      if (listener.bubbles) ensureRootListener(listener);
-      else attachDirectListener(node, id, listener);
+      // Global: always attached directly, regardless of `bubbles`
+      // (proto/stream-dom.proto Listener doc, docs/design.md "Global
+      // listeners").
+      const globalObj = target.kind === "window" ? window : document;
+      const name = transcoder.stringFor(listener.name);
+      attachDirectListener(globalObj, witTarget(target), name, listener);
+      if (
+        target.kind === "window" &&
+        (name === "hashchange" || name === "popstate")
+      ) {
+        dispatchSyntheticNavigation(name, listener);
+      }
     }
     transcoder.pendingAttach.length = 0;
     transcoder.pendingAttach.push(...stillPending);
 
-    for (const { id, listener } of transcoder.pendingDetach) {
-      if (listener.bubbles) {
-        releaseRootListener(listener);
-      } else {
-        const node = resolveNode(id);
-        if (node) detachDirectListener(node, listener);
+    for (const { target, listener } of transcoder.pendingDetach) {
+      if (target.kind === "node") {
+        if (listener.bubbles) {
+          releaseRootListener(listener);
+        } else {
+          const node = resolveNode(target.id);
+          if (node) detachDirectListener(node, listener);
+        }
+        continue;
       }
+      const globalObj = target.kind === "window" ? window : document;
+      detachDirectListener(globalObj, listener);
     }
     transcoder.pendingDetach.length = 0;
   };
@@ -427,6 +490,23 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
       });
     }
     rootListeners.clear();
+    // Global listeners (window/document) are never delegated, so they need
+    // their own teardown here — unlike per-node direct listeners, which
+    // die with their (already-detached-or-GC'd) nodes.
+    for (const globalObj of [window, document] as const) {
+      const byName = directListeners.get(globalObj);
+      if (!byName) continue;
+      for (const [nameRef, entry] of byName) {
+        globalObj.removeEventListener(
+          transcoder.stringFor(nameRef),
+          entry.handler,
+          {
+            capture: entry.capture,
+          },
+        );
+      }
+      directListeners.delete(globalObj);
+    }
     stream.drop();
     receiver.disconnect();
   }

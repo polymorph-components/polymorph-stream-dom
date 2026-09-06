@@ -53,7 +53,7 @@ macro_rules! launch {
             }
 
             async fn handle_event(
-                target: u32,
+                target: $crate::bindings::EventTarget,
                 name: u32,
                 payload: ::std::vec::Vec<u8>,
                 ev: &$crate::bindings::DomEvent,

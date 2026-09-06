@@ -92,7 +92,9 @@ fn todomvc_mounts_and_emits_its_markup() {
             Op::CreateText(c) => created.push(c.id),
             Op::CreatePlaceholder(c) => created.push(c.id),
             Op::InsertBefore(i) => {
-                assert!(created.contains(&i.parent) && created.contains(&i.id));
+                // The shim always states the parent, anchor or not.
+                let parent = i.parent.expect("the shim always names a parent");
+                assert!(created.contains(&parent) && created.contains(&i.id));
                 if let Some(a) = i.anchor {
                     assert!(created.contains(&a));
                 }
@@ -125,7 +127,7 @@ fn typing_a_todo_and_pressing_enter_creates_a_row() {
     // Enter creates the todo, and the app cancels the default action.
     let verdict = Rc::new(Verdict::default());
     assert!(event::dispatch(
-        new_todo,
+        Target::Node(new_todo),
         "keydown",
         keyboard("Enter"),
         verdict.clone()
@@ -179,7 +181,7 @@ fn typing_a_todo_and_pressing_enter_creates_a_row() {
 }
 
 use std::rc::Rc;
-use stream_dom_fakedom::event::{self, Verdict};
+use stream_dom_fakedom::event::{self, Target, Verdict};
 
 fn take_frames() -> Option<Vec<proto::Frame>> {
     let bytes = dom::take_batch()?;
@@ -221,7 +223,7 @@ fn element_with_class(
 
 fn deliver(target: u32, name: &str, payload: proto::EventPayload) {
     assert!(event::dispatch(
-        target,
+        Target::Node(target),
         name,
         payload,
         Rc::new(Verdict::default())
@@ -248,4 +250,108 @@ fn keyboard(key: &str) -> proto::EventPayload {
             },
         )),
     }
+}
+
+/// The round trip the global-listener change exists for: the browser
+/// changes the hash, the receiver reports `hashchange` on `window`, and
+/// the app's filter follows. In the first spike this could not be
+/// expressed at all — `window` had no addressable target, so the port had
+/// to cancel the link click and set the route by hand.
+#[test]
+fn a_hashchange_on_window_moves_the_selected_filter() {
+    let mount = mount_and_take_frames();
+    let interns = interns_of(&mount);
+    let class_slot = *interns.get("class").expect("`class` was interned");
+
+    // The three filter links are the only elements carrying `selected`
+    // signals; at mount, "All" is selected and the others are not.
+    let selected_at_mount = selected_ids(&mount, class_slot);
+    assert_eq!(
+        selected_at_mount.len(),
+        1,
+        "exactly one filter starts selected; got {selected_at_mount:?}"
+    );
+    let all_link = selected_at_mount[0];
+
+    // The links carry no click handlers now: the browser owns the hash.
+    assert!(
+        !mount.iter().any(|f| matches!(&f.op,
+            Some(Op::AddListener(l))
+                if l.listener.as_ref().and_then(|l| l.target)
+                    == Some(proto::listener::Target::Id(all_link))
+        )),
+        "the filter links should have no listeners of their own"
+    );
+
+    // ... and the app registered its `hashchange` on the window global.
+    assert!(
+        mount.iter().any(|f| matches!(&f.op,
+            Some(Op::AddListener(l)) if l.listener.as_ref().is_some_and(|l| {
+                l.target == Some(proto::listener::Target::Global(proto::Global::Window as i32))
+                    && interns.get("hashchange") == Some(&l.name)
+            })
+        )),
+        "no window `hashchange` listener was registered"
+    );
+
+    assert!(event::dispatch(
+        Target::Window,
+        "hashchange",
+        proto::EventPayload {
+            family: Some(proto::event_payload::Family::Navigation(
+                proto::NavigationData {
+                    href: "http://localhost/#/completed".to_string(),
+                },
+            )),
+        },
+        Rc::new(Verdict::default()),
+    ));
+    wasm_bindgen_futures::run_pending();
+
+    let after = take_frames().expect("the route change mutates the DOM");
+    let now_selected = selected_ids(&after, class_slot);
+    assert_eq!(
+        now_selected.len(),
+        1,
+        "exactly one filter ends selected; got {now_selected:?}"
+    );
+    assert_ne!(
+        now_selected[0], all_link,
+        "the selection should have moved off `All`"
+    );
+    // And `All` was explicitly deselected rather than just left behind.
+    assert!(
+        after.iter().any(|f| matches!(&f.op,
+            Some(Op::SetAttribute(a))
+                if a.id == all_link
+                    && a.name == class_slot
+                    && !a.value.as_deref().unwrap_or("").split(' ').any(|t| t == "selected")
+        )),
+        "`All` should have had `selected` removed"
+    );
+}
+
+/// Node ids whose last `class` write in this batch contains `selected`.
+fn selected_ids(frames: &[proto::Frame], class_slot: u32) -> Vec<u32> {
+    let mut state: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+    for f in frames {
+        if let Some(Op::SetAttribute(a)) = &f.op {
+            if a.name == class_slot {
+                let on = a
+                    .value
+                    .as_deref()
+                    .unwrap_or("")
+                    .split(' ')
+                    .any(|t| t == "selected");
+                state.insert(a.id, on);
+            }
+        }
+    }
+    let mut out: Vec<u32> = state
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(id, _)| id)
+        .collect();
+    out.sort_unstable();
+    out
 }

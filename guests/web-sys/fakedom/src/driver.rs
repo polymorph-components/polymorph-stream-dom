@@ -36,12 +36,12 @@ use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::Poll;
 
-use stream_dom_guest::bindings::{queries, DomEvent};
-use stream_dom_guest::{channel, NodeId, StrRef};
+use stream_dom_guest::bindings::{queries, DomEvent, EventTarget};
+use stream_dom_guest::{channel, StrRef};
 use wit_bindgen::rt::async_support::{spawn_local, StreamReader};
 
 use crate::dom::{self, Effect};
-use crate::event::{self, Verdict};
+use crate::event::{self, Target, Verdict};
 
 /// The read end of the mutation channel: what `run` hands back. Named here
 /// so [`crate::launch!`] can spell the export's return type without the
@@ -108,7 +108,7 @@ pub async fn run(mount: fn(), hydrate: bool) -> MutationStream {
 /// The imperative verdict is forwarded immediately afterwards — still
 /// before the first await, i.e. still inside the receiver's DOM listener
 /// frame — and only then are the handlers' mutations flushed.
-pub async fn handle_event(target: NodeId, name: StrRef, payload: Vec<u8>, ev: &DomEvent) {
+pub async fn handle_event(target: EventTarget, name: StrRef, payload: Vec<u8>, ev: &DomEvent) {
     if channel::is_dead() {
         return;
     }
@@ -124,6 +124,12 @@ pub async fn handle_event(target: NodeId, name: StrRef, payload: Vec<u8>, ev: &D
     let Ok(payload) = stream_dom_guest::decode_event(&payload) else {
         debug_assert!(false, "handle-event: undecodable payload");
         return;
+    };
+
+    let target = match target {
+        EventTarget::Node(id) => Target::Node(id),
+        EventTarget::Window => Target::Window,
+        EventTarget::Document => Target::Document,
     };
 
     let verdict = Rc::new(Verdict::default());

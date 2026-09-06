@@ -1,11 +1,17 @@
 Frame { commit: false, op: Some(Intern(Intern { id: 1, s: "div" })) }
 Frame { commit: false, op: Some(Intern(Intern { id: 2, s: "click" })) }
 Frame { commit: false, op: Some(Intern(Intern { id: 3, s: "class" })) }
+Frame { commit: false, op: Some(Intern(Intern { id: 4, s: "hashchange" })) }
 Frame { commit: false, op: Some(CreateElement(CreateElement { id: 1, tag: 1, ns: None })) }
 Frame { commit: false, op: Some(CreateText(CreateText { id: 2, text: "hello" })) }
-Frame { commit: false, op: Some(InsertBefore(InsertBefore { parent: 0, id: 1, anchor: None })) }
-Frame { commit: false, op: Some(InsertBefore(InsertBefore { parent: 1, id: 2, anchor: None })) }
+Frame { commit: false, op: Some(InsertBefore(InsertBefore { parent: Some(0), id: 1, anchor: None })) }
+Frame { commit: false, op: Some(InsertBefore(InsertBefore { parent: Some(1), id: 2, anchor: None })) }
+Frame { commit: false, op: Some(CreateText(CreateText { id: 3, text: "!" })) }
+Frame { commit: false, op: Some(InsertAfter(InsertAfter { parent: None, id: 3, anchor: 2 })) }
+Frame { commit: false, op: Some(CreateText(CreateText { id: 4, text: "?" })) }
+Frame { commit: false, op: Some(InsertBefore(InsertBefore { parent: None, id: 4, anchor: Some(3) })) }
 Frame { commit: false, op: Some(SetAttribute(SetAttribute { id: 1, name: 3, ns: None, value: Some("greeting") })) }
-Frame { commit: false, op: Some(AddListener(AddListener { listener: Some(Listener { id: 1, name: 2, bubbles: true, capture: false, passive: false, prevent_default: false, stop_propagation: false }) })) }
+Frame { commit: false, op: Some(AddListener(AddListener { listener: Some(Listener { name: 2, bubbles: true, capture: false, passive: false, prevent_default: false, stop_propagation: false, target: Some(Id(1)) }) })) }
+Frame { commit: false, op: Some(AddListener(AddListener { listener: Some(Listener { name: 4, bubbles: false, capture: false, passive: false, prevent_default: false, stop_propagation: false, target: Some(Global(Window)) }) })) }
 Frame { commit: false, op: Some(SetText(SetText { id: 2, text: "hello, world" })) }
 Frame { commit: true, op: Some(Remove(Remove { id: 2 })) }
