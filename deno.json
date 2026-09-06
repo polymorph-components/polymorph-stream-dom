@@ -14,7 +14,8 @@
     "@std/path": "jsr:@std/path@^1",
     "@std/fs": "jsr:@std/fs@^1",
     "@std/http/file-server": "jsr:@std/http@^1/file-server",
-    "playwright": "npm:playwright@^1.58"
+    "playwright": "npm:playwright@^1.58",
+    "linkedom": "npm:linkedom@^0.18"
   },
   "compilerOptions": {
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"],
