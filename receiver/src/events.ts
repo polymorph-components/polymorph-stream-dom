@@ -2,7 +2,7 @@
 // proto/stream-dom-events.proto is normative for every field number below;
 // only the families this bring-up receiver's mount layer wires up are
 // implemented (docs/design.md "Events": the family the receiver chooses by
-// event name) — mouse, keyboard, form. Every other name gets the empty
+// event name) — mouse, keyboard, form, navigation. Every other name gets the empty
 // payload (`EventPayload` with no `family` case set), which is legal per
 // the proto's header comment ("No case set is the empty payload — focus,
 // selection, ... the event name ... already says everything those
@@ -13,6 +13,7 @@ import { Writer } from "./proto.ts";
 const EVENT_PAYLOAD_MOUSE = 1;
 const EVENT_PAYLOAD_KEYBOARD = 2;
 const EVENT_PAYLOAD_FORM = 3;
+const EVENT_PAYLOAD_NAVIGATION = 14;
 
 const MOUSE_CLIENT_X = 1;
 const MOUSE_CLIENT_Y = 2;
@@ -54,6 +55,8 @@ const FORM_FIELDS = 3;
 const FORM_FIELD_NAME = 1;
 const FORM_FIELD_VALUE = 2;
 
+const NAVIGATION_HREF = 1;
+
 const MOUSE_EVENTS = new Set([
   "click",
   "dblclick",
@@ -90,12 +93,20 @@ const FORM_EVENTS = new Set([
   "reset",
 ]);
 
-export type Family = "mouse" | "keyboard" | "form" | "none";
+/** `window` listeners only (docs/design.md "Global listeners": "the only
+ * reason to listen to either is to learn where the document now is").
+ * `familyFor` doesn't know a listener's target, so it can't restrict on
+ * that here — a producer that somehow registered these on a node or on
+ * `document` still gets a sensible payload. */
+const NAVIGATION_EVENTS = new Set(["hashchange", "popstate"]);
+
+export type Family = "mouse" | "keyboard" | "form" | "navigation" | "none";
 
 export function familyFor(name: string): Family {
   if (MOUSE_EVENTS.has(name)) return "mouse";
   if (KEYBOARD_EVENTS.has(name)) return "keyboard";
   if (FORM_EVENTS.has(name)) return "form";
+  if (NAVIGATION_EVENTS.has(name)) return "navigation";
   return "none";
 }
 
@@ -178,6 +189,26 @@ function writeFormData(w: Writer, name: string, ev: Event): void {
   }
 }
 
+/** `popstate`/`hashchange`: a producer has no `location` to read
+ * (proto comment on `NavigationData`), so the receiver snapshots
+ * `location.href` at dispatch time — uniformly for both event kinds, even
+ * though `HashChangeEvent` itself carries `newURL`, since `PopStateEvent`
+ * doesn't and one field set beats a per-event-type split. Read
+ * defensively: `globalThis.location` is real in Deno too (so this compiles
+ * and behaves sanely under `deno test`), but a non-browser embedding of
+ * this module is still conceivable, and a `TypeError` here would be a
+ * strange way to lose an otherwise-fine event. */
+function writeNavigationData(w: Writer): void {
+  let href = "";
+  try {
+    href = globalThis.location?.href ?? "";
+  } catch {
+    // Accessing `location` can throw under exotic embeddings (sandboxed
+    // iframes, some SSR shims); "" degrades the same as "we don't know".
+  }
+  w.writeString(NAVIGATION_HREF, href);
+}
+
 /** Encode `ev` as an `EventPayload` for `name`'s family. Names outside
  * mouse/keyboard/form (including focus/blur and every family this receiver
  * does not yet implement) get the empty payload — zero bytes, which is a
@@ -197,6 +228,8 @@ export function encodePayload(name: string, ev: Event): Uint8Array {
     );
   } else if (family === "form") {
     w.writeMessage(EVENT_PAYLOAD_FORM, (m) => writeFormData(m, name, ev));
+  } else if (family === "navigation") {
+    w.writeMessage(EVENT_PAYLOAD_NAVIGATION, (m) => writeNavigationData(m));
   }
   return w.finish();
 }

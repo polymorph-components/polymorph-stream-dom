@@ -9,7 +9,7 @@ import {
 } from "@remote-dom/core";
 import type { RemoteConnection, RemoteMutationRecord } from "@remote-dom/core";
 import { RemoteDomTranscoder } from "../src/remote.ts";
-import type { TemplateNode } from "../src/frames.ts";
+import type { Listener, TemplateNode } from "../src/frames.ts";
 
 class FakeConnection implements RemoteConnection {
   batches: RemoteMutationRecord[][] = [];
@@ -553,8 +553,8 @@ Deno.test("listener registry: add/remove bookkeeping and pending queues", () => 
   t.internString(1, "div");
   t.createElement(10, 1, undefined);
 
-  const listener = {
-    id: 10,
+  const listener: Listener = {
+    target: { kind: "node", id: 10 },
     name: 5,
     bubbles: true,
     capture: false,
@@ -564,11 +564,44 @@ Deno.test("listener registry: add/remove bookkeeping and pending queues", () => 
   };
   t.addListener(listener);
   assertEquals(t.listenerFor(10, 5), listener);
-  assertEquals(t.pendingAttach, [{ id: 10, listener }]);
+  assertEquals(t.pendingAttach, [{ target: listener.target, listener }]);
 
   t.removeListener(listener);
   assertEquals(t.listenerFor(10, 5), undefined);
-  assertEquals(t.pendingDetach, [{ id: 10, listener }]);
+  assertEquals(t.pendingDetach, [{ target: listener.target, listener }]);
+});
+
+Deno.test("listener registry: global (window/document) add/remove is tracked separately from node listeners", () => {
+  const { t } = transcoder();
+
+  const winListener: Listener = {
+    target: { kind: "window" },
+    name: 4,
+    bubbles: false,
+    capture: false,
+    passive: false,
+    preventDefault: false,
+    stopPropagation: false,
+  };
+  const docListener: Listener = {
+    ...winListener,
+    target: { kind: "document" },
+    name: 6,
+  };
+  t.addListener(winListener);
+  t.addListener(docListener);
+  assertEquals(t.pendingAttach, [
+    { target: winListener.target, listener: winListener },
+    { target: docListener.target, listener: docListener },
+  ]);
+
+  t.removeListener(winListener);
+  assertEquals(t.pendingDetach, [{
+    target: winListener.target,
+    listener: winListener,
+  }]);
+  // The document listener is untouched by removing the window one — they
+  // are not stored in the same bucket.
 });
 
 Deno.test("onCommit runs after mutate, and only when there is something to mutate or always?", () => {

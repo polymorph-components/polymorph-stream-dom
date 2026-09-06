@@ -75,6 +75,11 @@ const LISTENER_CAPTURE = 4;
 const LISTENER_PASSIVE = 5;
 const LISTENER_PREVENT_DEFAULT = 6;
 const LISTENER_STOP_PROPAGATION = 7;
+const LISTENER_GLOBAL = 8;
+
+/** `Global` enum values (proto/stream-dom.proto). */
+const GLOBAL_WINDOW = 0;
+const GLOBAL_DOCUMENT = 1;
 
 const ADD_LISTENER_LISTENER = 1;
 const REMOVE_LISTENER_LISTENER = 1;
@@ -109,9 +114,19 @@ const BIND_MARKER_ID = 2;
 
 // -- decoded shapes -------------------------------------------------------
 
+/** `Listener.target`'s oneof (proto/stream-dom.proto): a node id, or one
+ * of the two receiver-side singletons (`Global`). Mirrors the shape
+ * `mount.ts` builds for the WIT `event-target` variant, though the two
+ * are not the same type — this one is this decoder's own, `id`-named
+ * rather than `value`-named for readability at call sites. */
+export type ListenerTarget =
+  | { kind: "node"; id: number }
+  | { kind: "window" }
+  | { kind: "document" };
+
 /** `proto/stream-dom.proto`'s `Listener` message. */
 export interface Listener {
-  id: number;
+  target: ListenerTarget;
   name: number;
   bubbles: boolean;
   capture: boolean;
@@ -186,44 +201,64 @@ export interface FrameSink {
 }
 
 function decodeListener(r: Reader): Listener {
-  const l: Listener = {
-    id: 0,
-    name: 0,
-    bubbles: false,
-    capture: false,
-    passive: false,
-    preventDefault: false,
-    stopPropagation: false,
-  };
+  let target: ListenerTarget | undefined;
+  let name = 0;
+  let bubbles = false;
+  let capture = false;
+  let passive = false;
+  let preventDefault = false;
+  let stopPropagation = false;
   while (!r.finished()) {
     const [field, wireType] = r.readTag();
     switch (field) {
       case LISTENER_ID:
-        l.id = r.readVarint32();
+        target = { kind: "node", id: r.readVarint32() };
         break;
+      case LISTENER_GLOBAL: {
+        const g = r.readVarint32();
+        if (g === GLOBAL_WINDOW) target = { kind: "window" };
+        else if (g === GLOBAL_DOCUMENT) target = { kind: "document" };
+        else throw new Error(`stream-dom: Listener.global unknown value ${g}`);
+        break;
+      }
       case LISTENER_NAME:
-        l.name = r.readVarint32();
+        name = r.readVarint32();
         break;
       case LISTENER_BUBBLES:
-        l.bubbles = r.readBool();
+        bubbles = r.readBool();
         break;
       case LISTENER_CAPTURE:
-        l.capture = r.readBool();
+        capture = r.readBool();
         break;
       case LISTENER_PASSIVE:
-        l.passive = r.readBool();
+        passive = r.readBool();
         break;
       case LISTENER_PREVENT_DEFAULT:
-        l.preventDefault = r.readBool();
+        preventDefault = r.readBool();
         break;
       case LISTENER_STOP_PROPAGATION:
-        l.stopPropagation = r.readBool();
+        stopPropagation = r.readBool();
         break;
       default:
         r.skip(wireType);
     }
   }
-  return l;
+  // Proto3 `oneof` has no default case: neither field set is a genuine
+  // absence, not "id 0" (which IS the mount root and a legal target).
+  if (!target) {
+    throw new Error(
+      "stream-dom: Listener has no target (neither id nor global set)",
+    );
+  }
+  return {
+    target,
+    name,
+    bubbles,
+    capture,
+    passive,
+    preventDefault,
+    stopPropagation,
+  };
 }
 
 /** A `repeated uint32` field: proto3 packs scalar-numeric repeated fields

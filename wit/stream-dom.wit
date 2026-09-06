@@ -22,6 +22,14 @@ interface types {
   type node-id = u32;
   /// Interned string slot, defined by a prior `Intern` frame.
   type str-ref = u32;
+  /// What a listener was registered on: a node, or one of the two
+  /// receiver-side singletons a producer may name without creating
+  /// (`Listener.target` in the proto).
+  variant event-target {
+    node(node-id),
+    window,
+    document,
+  }
 }
 
 /// Host-side reads and imperative DOM actions. All `async`: a host behind
@@ -57,7 +65,7 @@ interface events {
 }
 
 world producer {
-  use types.{node-id, str-ref};
+  use types.{node-id, str-ref, event-target};
   use events.{dom-event};
 
   import queries;
@@ -79,7 +87,7 @@ world producer {
   /// is synthetic: the receiver fires it once per registered element after
   /// the commit of the batch that created it, with an empty payload.
   export handle-event: async func(
-    target: node-id,
+    target: event-target,
     name: str-ref,
     payload: list<u8>,
     ev: borrow<dom-event>,

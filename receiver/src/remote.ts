@@ -27,6 +27,7 @@ import type {
 import type {
   FrameSink,
   Listener,
+  ListenerTarget,
   PropertyValue,
   TemplateNode,
 } from "./frames.ts";
@@ -50,9 +51,15 @@ interface ShadowNode {
   attached: boolean;
 }
 
-/** Registered listeners for one node, keyed by the interned event-name ref
- * (`Listener.name`) so add/remove find the same entry. */
+/** Registered listeners for one target (a node, or a global singleton),
+ * keyed by the interned event-name ref (`Listener.name`) so add/remove
+ * find the same entry. */
 type ListenerMap = Map<number, Listener>;
+
+/** `ListenerTarget` narrowed to its two global cases, and the key
+ * `#globalListeners` uses for them — the two are not the "global" oneof
+ * case number, just this class's own bookkeeping key. */
+type GlobalKind = "window" | "document";
 
 /** A registered template: the flat arena plus its declared root indices,
  * as `register-template` sent them (docs/design.md "Templates are core,
@@ -103,12 +110,14 @@ export class RemoteDomTranscoder implements FrameSink {
   #templates = new Map<number, Template>();
   #ridCounter = 0;
   #records: RemoteMutationRecord[] = [];
-  #listeners = new Map<number, ListenerMap>();
+  #nodeListeners = new Map<number, ListenerMap>();
+  #globalListeners = new Map<GlobalKind, ListenerMap>();
   /** Listener adds/removes captured this batch, drained by `mount.ts`'s
    * `onCommit` hook after `commit()`'s `mutate` call (nodes only exist in
-   * the real DOM once `mutate` has run). */
-  pendingAttach: Array<{ id: number; listener: Listener }> = [];
-  pendingDetach: Array<{ id: number; listener: Listener }> = [];
+   * the real DOM once `mutate` has run — globals need no such wait, but
+   * are queued the same way for one code path). */
+  pendingAttach: Array<{ target: ListenerTarget; listener: Listener }> = [];
+  pendingDetach: Array<{ target: ListenerTarget; listener: Listener }> = [];
   onCommit: (() => void) | undefined;
 
   constructor(connection: RemoteConnection) {
@@ -505,24 +514,38 @@ export class RemoteDomTranscoder implements FrameSink {
   // -- listeners: recorded, not remote-dom properties (see class doc) -----
 
   addListener(listener: Listener): void {
-    const map = this.#listenersFor(listener.id);
+    const map = this.#listenersFor(listener.target);
     map.set(listener.name, listener);
-    this.pendingAttach.push({ id: listener.id, listener });
+    this.pendingAttach.push({ target: listener.target, listener });
   }
 
   removeListener(listener: Listener): void {
-    const map = this.#listeners.get(listener.id);
+    const map = this.#existingListenersFor(listener.target);
     map?.delete(listener.name);
-    this.pendingDetach.push({ id: listener.id, listener });
+    this.pendingDetach.push({ target: listener.target, listener });
   }
 
-  #listenersFor(id: number): ListenerMap {
-    let map = this.#listeners.get(id);
+  #listenersFor(target: ListenerTarget): ListenerMap {
+    if (target.kind === "node") {
+      let map = this.#nodeListeners.get(target.id);
+      if (!map) {
+        map = new Map();
+        this.#nodeListeners.set(target.id, map);
+      }
+      return map;
+    }
+    let map = this.#globalListeners.get(target.kind);
     if (!map) {
       map = new Map();
-      this.#listeners.set(id, map);
+      this.#globalListeners.set(target.kind, map);
     }
     return map;
+  }
+
+  #existingListenersFor(target: ListenerTarget): ListenerMap | undefined {
+    return target.kind === "node"
+      ? this.#nodeListeners.get(target.id)
+      : this.#globalListeners.get(target.kind);
   }
 
   // -- templates ------------------------------------------------------------
@@ -695,7 +718,7 @@ export class RemoteDomTranscoder implements FrameSink {
    * dispatch walk uses this to find the nearest ancestor with a
    * registration. */
   listenerFor(id: number, nameRef: number): Listener | undefined {
-    return this.#listeners.get(id)?.get(nameRef);
+    return this.#nodeListeners.get(id)?.get(nameRef);
   }
 
   // -- commit ---------------------------------------------------------------

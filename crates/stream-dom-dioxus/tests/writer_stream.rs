@@ -57,6 +57,22 @@ impl Known {
     }
 }
 
+/// The node a listener was registered on.
+///
+/// `Listener.target` is a oneof: a node id, or a `Global` (`window` /
+/// `document`). A Dioxus producer only ever reaches the first case —
+/// `WriteMutations` names an `ElementId` and nothing else — so a `Global`
+/// here means the writer invented a registration Dioxus never asked for.
+fn listener_node(l: &proto::Listener, what: &str) -> NodeId {
+    match l.target {
+        Some(proto::listener::Target::Id(id)) => id,
+        Some(proto::listener::Target::Global(g)) => {
+            panic!("{what}: Dioxus has no global listeners, but one targets Global({g})")
+        }
+        None => panic!("{what}: listener frame with no target set"),
+    }
+}
+
 fn decode_all(bytes: &[u8]) -> Vec<proto::Frame> {
     let mut buf = bytes;
     let mut frames = Vec::new();
@@ -177,12 +193,12 @@ fn check_batch(bytes: &[u8], known: &mut Known) -> Vec<proto::Frame> {
             }
             Op::AddListener(l) => {
                 let l = l.listener.as_ref().unwrap();
-                known.node(l.id, "add-listener");
+                known.node(listener_node(l, "add-listener"), "add-listener");
                 known.slot(l.name, "add-listener name");
             }
             Op::RemoveListener(l) => {
                 let l = l.listener.as_ref().unwrap();
-                known.node(l.id, "remove-listener");
+                known.node(listener_node(l, "remove-listener"), "remove-listener");
                 known.slot(l.name, "remove-listener name");
             }
             Op::BindMarker(_) => panic!("bind-marker is hydration-only; this spike emits none"),
@@ -284,7 +300,8 @@ fn rebuild_and_update_uphold_stream_invariants() {
         .find_map(|f| match &f.op {
             Some(proto::frame::Op::AddListener(l)) => {
                 let l = l.listener.as_ref().unwrap();
-                (interner.borrow().resolve(l.name) == Some("click")).then_some(l.id)
+                (interner.borrow().resolve(l.name) == Some("click"))
+                    .then(|| listener_node(l, "add-listener"))
             }
             _ => None,
         })
@@ -390,10 +407,12 @@ fn rebuild_and_update_uphold_stream_invariants() {
                 referenced.insert(p.id);
             }
             Some(Op::AddListener(l)) => {
-                referenced.insert(l.listener.as_ref().unwrap().id);
+                let l = l.listener.as_ref().unwrap();
+                referenced.insert(listener_node(l, "add-listener"));
             }
             Some(Op::RemoveListener(l)) => {
-                referenced.insert(l.listener.as_ref().unwrap().id);
+                let l = l.listener.as_ref().unwrap();
+                referenced.insert(listener_node(l, "remove-listener"));
             }
             _ => {}
         }
