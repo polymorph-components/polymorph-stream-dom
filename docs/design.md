@@ -812,7 +812,9 @@ definition.
 7. **Conformance corpus.** Recorded length-delimited `Frame` streams
    (`.pb`) plus the event payloads that answer them, as the shared test
    vector across adapters × transports; readable with stock protobuf
-   tooling; first thing to build.
+   tooling; first thing to build. Seed the edge cases from rrweb's list
+   (`<input>` value vs attribute, `<textarea>` content, `<select>`
+   selection, adjacent text nodes, `<canvas>`, shadow roots).
 8. **First producer.** Leptos (tachys `Renderer`) if its renderer is still
    pluggable in current releases, else Sycamore; Dioxus as the diffing
    counterpart. A fine-grained first producer exercises templates,
@@ -836,3 +838,12 @@ definition.
     not reintroduce a per-batch frame. Producers will ask (React
     `<ViewTransition>`, Svelte and Vue navigation hooks); design it when
     one does.
+12. **Measure remote-dom's wire before citing its cost.** The record says
+    remote-dom's format (per-node JSON, subtree-atomic inserts, no
+    templates or interning) is too slow for whole-app rendering. Nobody has
+    measured it: run js-framework-benchmark's mount and update through
+    `DOMRemoteReceiver` across a worker. If it holds up, the case for this
+    protocol's own wire rests on hydration, streaming with backpressure,
+    namespaces, imperative `preventDefault` and the wasm-native path —
+    sufficient, but the record should then say so instead of leaning on
+    mount cost.
