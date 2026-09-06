@@ -18,3 +18,27 @@ wit-bindgen = { version = "=0.60.0", features = ["async-spawn", "inter-task-wake
 
 [dev-dependencies]
 prost = { version = "0.14", default-features = false, features = ["derive"] }
+# The acceptance test drives the fake DOM through the *real* `web_sys`,
+# which reaches it through the `JsObject` protocol in `src/protocol.rs`.
+# A dev-dependency only: nothing in the library knows `web_sys` exists.
+web-sys = { version = "0.3", features = [
+  "CssRule",
+  "CssRuleList",
+  "CssStyleDeclaration",
+  "CssStyleRule",
+  "CssStyleSheet",
+  "Document",
+  "DomTokenList",
+  "Element",
+  "Event",
+  "EventTarget",
+  "HtmlElement",
+  "HtmlHeadElement",
+  "HtmlInputElement",
+  "HtmlStyleElement",
+  "KeyboardEvent",
+  "Node",
+  "StyleSheet",
+  "Text",
+  "Window",
+] }

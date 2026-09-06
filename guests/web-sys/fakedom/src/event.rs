@@ -8,12 +8,11 @@
 //! `Runtime::handle_event` and Dioxus does its own synthetic bubbling
 //! (crates/stream-dom-dioxus/src/driver.rs).
 
-use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use stream_dom_guest::proto;
-use wasm_bindgen::{JsObject, JsValue};
+use wasm_bindgen::JsValue;
 
 use crate::dom;
 use crate::node::NodeData;
@@ -92,6 +91,13 @@ fn class_chain_for(name: &str) -> &'static [&'static str] {
 }
 
 impl EventData {
+    /// The event interface this name is delivered as. The `JsObject` impl
+    /// (in [`crate::protocol`]) hands this out; `instanceof` is the whole
+    /// of it.
+    pub fn chain(&self) -> &'static [&'static str] {
+        self.class_chain
+    }
+
     pub fn current_target(&self) -> Option<Rc<NodeData>> {
         self.current_target.borrow().clone()
     }
@@ -162,6 +168,7 @@ impl EventData {
     pub fn modifiers(&self) -> proto::Modifiers {
         match &self.payload.family {
             Some(proto::event_payload::Family::Keyboard(k)) => k.modifiers.unwrap_or_default(),
+            Some(proto::event_payload::Family::Touch(t)) => t.modifiers.unwrap_or_default(),
             Some(proto::event_payload::Family::Mouse(_))
             | Some(proto::event_payload::Family::Pointer(_))
             | Some(proto::event_payload::Family::Wheel(_)) => {
@@ -170,14 +177,26 @@ impl EventData {
             _ => proto::Modifiers::default(),
         }
     }
-}
 
-impl JsObject for EventData {
-    fn class_chain(&self) -> &[&'static str] {
-        self.class_chain
+    pub fn wheel(&self) -> &proto::WheelData {
+        match &self.payload.family {
+            Some(proto::event_payload::Family::Wheel(w)) => w,
+            _ => self.family_mismatch("wheel"),
+        }
     }
-    fn as_any(&self) -> &dyn Any {
-        self
+
+    pub fn pointer(&self) -> &proto::PointerData {
+        match &self.payload.family {
+            Some(proto::event_payload::Family::Pointer(p)) => p,
+            _ => self.family_mismatch("pointer"),
+        }
+    }
+
+    pub fn animation(&self) -> &proto::AnimationData {
+        match &self.payload.family {
+            Some(proto::event_payload::Family::Animation(a)) => a,
+            _ => self.family_mismatch("animation"),
+        }
     }
 }
 

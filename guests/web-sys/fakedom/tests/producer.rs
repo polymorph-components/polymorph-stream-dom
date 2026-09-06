@@ -35,8 +35,18 @@ fn frames() -> Vec<proto::Frame> {
     decode_all(&dom::take_batch().expect("a non-empty batch"))
 }
 
+/// `web_sys::window()` is `js_sys::global().dyn_into::<Window>()`, so the
+/// fake DOM has to have installed `globalThis` before the first call. The
+/// driver does this in `run`; a test fixture has to do it itself.
 fn document() -> web_sys::Document {
+    stream_dom_fakedom::install();
     web_sys::window().unwrap().document().unwrap()
+}
+
+/// The protocol's mount root (node id 0) as a `Node`. `document.body` is
+/// the same node -- see `stream_dom_fakedom::protocol`.
+fn mount_root() -> Node {
+    Node::from(dom::mount_root())
 }
 
 fn element(tag: &str) -> Element {
@@ -144,7 +154,7 @@ fn slot_of(frames: &[proto::Frame], s: &str) -> u32 {
 
 #[test]
 fn a_small_tree_produces_a_well_formed_batch() {
-    let root = web_sys::mount_root_node();
+    let root = mount_root();
     let div = element("div");
     root.append_child(div.as_ref()).unwrap();
 
@@ -220,7 +230,7 @@ fn removing_an_attribute_sends_set_attribute_with_no_value() {
 
 #[test]
 fn moving_an_attached_node_is_one_insert_before_and_no_remove() {
-    let root = web_sys::mount_root_node();
+    let root = mount_root();
     let a = element("a");
     let b = element("b");
     let c = element("c");
@@ -252,7 +262,7 @@ fn moving_an_attached_node_is_one_insert_before_and_no_remove() {
 
 #[test]
 fn replace_child_is_insert_before_then_remove() {
-    let root = web_sys::mount_root_node();
+    let root = mount_root();
     let old = element("old");
     root.append_child(old.as_ref()).unwrap();
     let _ = dom::take_batch();
@@ -312,7 +322,7 @@ fn mouse_payload() -> proto::EventPayload {
 
 #[test]
 fn a_form_event_updates_the_control_before_the_handlers_run() {
-    let root = web_sys::mount_root_node();
+    let root = mount_root();
     let input = element("input");
     root.append_child(input.as_ref()).unwrap();
     let id = node_id(&input);
@@ -371,7 +381,7 @@ fn a_form_event_updates_the_control_before_the_handlers_run() {
 
 #[test]
 fn a_checkbox_change_delivers_checked() {
-    let root = web_sys::mount_root_node();
+    let root = mount_root();
     let input = element("input");
     input.set_attribute("type", "checkbox").unwrap();
     root.append_child(input.as_ref()).unwrap();
@@ -401,7 +411,7 @@ fn a_checkbox_change_delivers_checked() {
 /// `stopImmediatePropagation` also skips those.
 #[test]
 fn propagation_stops_at_the_node_boundary_not_mid_node() {
-    let root = web_sys::mount_root_node();
+    let root = mount_root();
     let outer = element("div");
     let inner = element("span");
     root.append_child(outer.as_ref()).unwrap();
@@ -536,7 +546,7 @@ fn a_dominator_stylesheet_becomes_a_style_element_in_the_mount() {
 
     // And the `<style>` element really is inside the mount root, so the
     // receiver applies it.
-    assert!(web_sys::mount_root_node()
+    assert!(mount_root()
         .first_child()
         .is_some_and(|n| node_id_of(&n) == node_id_of(style.as_ref())));
 }
@@ -545,7 +555,7 @@ fn a_dominator_stylesheet_becomes_a_style_element_in_the_mount() {
 /// driver runs, via `queries.set-focus`, after the batch is committed.
 #[test]
 fn focus_is_an_effect_not_a_frame() {
-    let root = web_sys::mount_root_node();
+    let root = mount_root();
     let input = element("input");
     root.append_child(input.as_ref()).unwrap();
     let id = node_id(&input);

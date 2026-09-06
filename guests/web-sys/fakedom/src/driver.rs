@@ -84,6 +84,10 @@ pub async fn run(mount: fn(), hydrate: bool) -> MutationStream {
 
     let reader = channel::open();
 
+    // Before anything else: `web_sys::window()` reads `globalThis`, and
+    // the app's first line is normally exactly that.
+    dom::install();
+
     spawn_local(async move {
         // The mount itself runs here, not in `run`'s body: it writes.
         mount();

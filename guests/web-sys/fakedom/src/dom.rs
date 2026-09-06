@@ -62,6 +62,13 @@ impl Dom {
         // simply never appear in a frame.
         let document = NodeData::document(ids.alloc());
         let window = NodeData::window(ids.alloc());
+        // `web_sys::window()` is `js_sys::global().dyn_into::<Window>()`
+        // (web-sys-0.3.105/src/lib.rs:38), so `globalThis` *is* the window
+        // object here, and the whole fake DOM hangs off it. Installed as
+        // the DOM is created, which is why [`install`] exists: the very
+        // first thing a framework does is call `web_sys::window()`, and
+        // `wasm_bindgen::__rt::global()` panics if nothing installed one.
+        wasm_bindgen::__rt::install_global(window.value());
         Dom {
             ids,
             interner: Interner::new(),
@@ -93,6 +100,19 @@ fn with_dom<R>(f: impl FnOnce(&mut Dom) -> R) -> R {
 }
 
 // --- Singletons -------------------------------------------------------
+
+/// Create the DOM singleton if it does not exist yet, installing
+/// `globalThis` (see [`Dom::new`]).
+///
+/// Every entry point must call this **before** the first `web_sys` call on
+/// its thread. There is no lazier option: `web_sys::window()` reads
+/// `js_sys::global()`, which panics unless a global has been installed, and
+/// it is normally the first thing a framework touches — so the fake DOM
+/// never gets a chance to install one "on demand". The driver calls it in
+/// `run` before mounting; native tests call it in their fixture.
+pub fn install() {
+    with_dom(|_| ());
+}
 
 pub fn mount_root() -> JsValue {
     with_dom(|d| d.root.value())

@@ -3,8 +3,9 @@
 //!
 //! This crate is the substance of the "recording fake `web_sys` layer"
 //! producer strategy (docs/design.md "Producer seams" -> "Wasm-native
-//! producers", the Dominator row). The `web-sys` shim next door is a thin
-//! translation of the browser API onto the model here; this crate holds
+//! producers", the Dominator row). The *real* `web_sys` reaches this crate
+//! through the `JsObject` protocol -- see [`protocol`], which is a thin
+//! translation of the browser API onto the model here. This crate holds
 //! the shadow DOM, the frame emission, and the world's `run` /
 //! `handle-event` implementation.
 //!
@@ -15,6 +16,8 @@
 //! - [`css`]: `classList`, element `style`, and the slice of CSSOM
 //!   dominator's `class!` macro needs.
 //! - [`event`]: event objects, propagation, and the imperative verdict.
+//! - [`protocol`]: the `JsObject` dispatch table the real `web_sys`
+//!   bindings land on — the translation layer over everything above.
 //! - [`driver`] (component target only): `run` and `handle-event` over
 //!   [`stream_dom_guest::channel`].
 //!
@@ -26,11 +29,12 @@ pub mod css;
 pub mod dom;
 pub mod event;
 pub mod node;
+pub mod protocol;
 
 #[cfg(target_arch = "wasm32")]
 pub mod driver;
 
-pub use dom::{document, mount_root, window};
+pub use dom::{document, install, mount_root, window};
 
 /// The generated `producer`-world bindings, re-exported so an app crate
 /// reaches `Guest` / `export!` through [`launch!`] without depending on

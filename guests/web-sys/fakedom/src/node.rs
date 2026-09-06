@@ -6,13 +6,12 @@
 //! coercion `Rc<NodeData> -> Rc<dyn JsObject>` keeps one allocation, so
 //! that `Weak` stays live for as long as any `JsValue` holds the node.
 
-use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use stream_dom_guest::NodeId;
-use wasm_bindgen::{JsObject, JsValue};
+use wasm_bindgen::JsValue;
 
 pub const SVG_NS: &str = "http://www.w3.org/2000/svg";
 
@@ -162,6 +161,13 @@ impl NodeData {
             .expect("fakedom: node self-reference outlived its allocation")
     }
 
+    /// The class and every class it inherits from, most derived first.
+    /// The `JsObject` impl (in [`crate::protocol`]) hands this out, and the
+    /// protocol dispatch reads it to tell an `<input>` from a `<style>`.
+    pub fn chain(&self) -> &'static [&'static str] {
+        self.class_chain
+    }
+
     pub fn value(&self) -> JsValue {
         JsValue::from_object(self.rc())
     }
@@ -258,25 +264,6 @@ impl NodeData {
             out.push(p);
         }
         out
-    }
-}
-
-impl JsObject for NodeData {
-    fn class_chain(&self) -> &[&'static str] {
-        self.class_chain
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn get(&self, key: &str) -> Result<JsValue, JsValue> {
-        Ok(self.prop(key))
-    }
-
-    fn set(&self, key: &str, value: JsValue) -> Result<(), JsValue> {
-        crate::dom::reflect_set(self, key, value);
-        Ok(())
     }
 }
 

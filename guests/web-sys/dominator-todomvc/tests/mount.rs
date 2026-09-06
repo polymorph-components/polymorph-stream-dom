@@ -14,7 +14,10 @@ use stream_dom_fakedom::dom;
 use stream_dom_guest::proto::{self, frame::Op};
 
 fn mount_and_take_frames() -> Vec<proto::Frame> {
-    dominator::append_dom(&web_sys::mount_root_node(), App::render(App::new()));
+    // `web_sys::window()` reads `globalThis`, which the fake DOM installs
+    // when its singleton is created; the driver does this in `run`.
+    stream_dom_fakedom::install();
+    dominator::append_dom(&dominator::body(), App::render(App::new()));
     wasm_bindgen_futures::run_pending();
 
     let bytes = dom::take_batch().expect("the mount produced a batch");

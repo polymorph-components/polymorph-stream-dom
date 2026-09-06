@@ -13,15 +13,14 @@
 //!
 //! It resolves the way a browser would: the accumulated CSS text is
 //! written back to the `<style>` element on every rule change, and that
-//! element lives inside the mount root (see `Document::head` in the
-//! `web-sys` shim). The receiver therefore gets real CSS in a real
+//! element lives inside the mount root (see `document.head` in
+//! [`crate::protocol`]). The receiver therefore gets real CSS in a real
 //! `<style>` tag and `display: none` actually hides things.
 
-use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use wasm_bindgen::{JsObject, JsValue};
+use wasm_bindgen::JsValue;
 
 use crate::dom;
 use crate::node::NodeData;
@@ -29,15 +28,6 @@ use crate::node::NodeData;
 /// `element.classList`.
 pub struct DomTokenListObj {
     pub node: Rc<NodeData>,
-}
-
-impl JsObject for DomTokenListObj {
-    fn class_chain(&self) -> &[&'static str] {
-        &["DOMTokenList", "Object"]
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 /// One CSS rule in [`StyleSheetObj`]. Only style rules exist here;
@@ -74,15 +64,6 @@ impl StyleRuleObj {
         if let Some(sheet) = self.sheet.borrow().upgrade() {
             sheet.resync();
         }
-    }
-}
-
-impl JsObject for StyleRuleObj {
-    fn class_chain(&self) -> &[&'static str] {
-        &["CSSStyleRule", "CSSRule", "Object"]
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -164,15 +145,6 @@ impl StyleSheetObj {
     }
 }
 
-impl JsObject for StyleSheetObj {
-    fn class_chain(&self) -> &[&'static str] {
-        &["CSSStyleSheet", "StyleSheet", "CSSRuleList", "Object"]
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
 /// What a `CssStyleDeclaration` is attached to: an element's inline
 /// `style` attribute, or a stylesheet rule's block.
 pub enum StyleTarget {
@@ -185,7 +157,10 @@ pub struct StyleDeclObj {
 }
 
 impl StyleDeclObj {
-    pub fn get(&self, name: &str) -> String {
+    /// Named for the DOM methods rather than `get`/`set`, because the
+    /// `JsObject` impl in [`crate::protocol`] adds trait methods of those
+    /// names to this very type and inherent methods silently win.
+    pub fn property(&self, name: &str) -> String {
         match &self.target {
             StyleTarget::Element(node) => dom::style_get(node, name),
             StyleTarget::Rule(rule) => rule
@@ -198,7 +173,7 @@ impl StyleDeclObj {
         }
     }
 
-    pub fn set(&self, name: &str, value: &str, important: bool) {
+    pub fn set_property(&self, name: &str, value: &str, important: bool) {
         match &self.target {
             StyleTarget::Element(node) => dom::style_set(node, name, value, important),
             StyleTarget::Rule(rule) => {
@@ -219,24 +194,15 @@ impl StyleDeclObj {
         }
     }
 
-    pub fn remove(&self, name: &str) -> String {
+    pub fn remove_property(&self, name: &str) -> String {
         match &self.target {
             StyleTarget::Element(node) => dom::style_remove(node, name),
             StyleTarget::Rule(rule) => {
-                let old = self.get(name);
+                let old = self.property(name);
                 rule.decls.borrow_mut().retain(|(n, _)| n != name);
                 rule.resync();
                 old
             }
         }
-    }
-}
-
-impl JsObject for StyleDeclObj {
-    fn class_chain(&self) -> &[&'static str] {
-        &["CSSStyleDeclaration", "Object"]
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

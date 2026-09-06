@@ -10,10 +10,13 @@
 //! 2. **No URL routing.** `Route` is a plain `Mutable<Route>` the filter
 //!    links set directly, instead of being derived from
 //!    `dominator::routing::url()`. A producer has no `Location` and no
-//!    `History` (see the `web-sys` shim, which panics on both); routing
-//!    belongs to whatever owns the address bar, which is the receiver.
+//!    `History` (see `stream_dom_fakedom::protocol`, which refuses both);
+//!    routing belongs to whatever owns the address bar, which is the
+//!    receiver.
 //! 3. **Mount.** `dominator::append_dom` onto the protocol's mount root
-//!    (node id 0) instead of `dominator::get_id("app")`.
+//!    (node id 0) instead of `dominator::get_id("app")`. That is spelled
+//!    with dominator's own `body()`, because the fake `document.body` *is*
+//!    the mount root -- the receiver owns everything above it.
 //!
 //! Everything else -- the markup, the class names, the signals, the event
 //! handlers, `focused_signal`, `visible_signal` -- is unmodified, which is
@@ -41,5 +44,5 @@ pub use app::App;
 stream_dom_fakedom::launch!(mount);
 
 fn mount() {
-    dominator::append_dom(&web_sys::mount_root_node(), App::render(App::new()));
+    dominator::append_dom(&dominator::body(), App::render(App::new()));
 }
