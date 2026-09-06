@@ -46,6 +46,24 @@ interface CompiledTemplate {
   prototypes: Node[];
 }
 
+/** The mount root's producer id (proto/stream-dom.proto: "0 is the mount
+ * root"). The embedder owns that node, not the producer: it is registered
+ * once by the constructor and is structurally inviolable thereafter — no
+ * op may create, re-register, alias, move or remove it. Leaf ops
+ * (attributes, properties, text) on it stay legal protocol; denying those
+ * is a policy's job, not this receiver's. */
+const ROOT_ID = 0;
+
+/** `Node.nodeType` values used for the op-target type checks below.
+ * Compared numerically rather than with `instanceof Element` /
+ * `instanceof CharacterData` because those constructors are not global in
+ * every realm this receiver runs in (Deno's test runtime has no DOM
+ * globals), and a `Node` handed in by the embedder may come from another
+ * document anyway. */
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+const COMMENT_NODE = 8;
+
 /** A duck-typed `Node.moveBefore` (Chrome 133+, 2025): preserves iframe
  * state, focus, selection and running animations that `insertBefore`
  * resets, but throws under conditions `insertBefore` tolerates (crossing
@@ -74,7 +92,9 @@ export class NativeDomReceiver implements Receiver, FrameSink {
 
   constructor(root: Element) {
     this.#doc = root.ownerDocument;
-    this.#register(0, root);
+    // The one binding of `ROOT_ID` that ever happens: `#register` rejects
+    // it from here on.
+    this.#bind(ROOT_ID, root);
   }
 
   get sink(): FrameSink {
@@ -91,9 +111,43 @@ export class NativeDomReceiver implements Receiver, FrameSink {
    * listeners it attached separately. */
   dispose(): void {}
 
-  #register(id: number, node: Node): void {
+  #bind(id: number, node: Node): void {
     this.#nodes.set(id, node);
     this.#ids.set(node, id);
+  }
+
+  /** Bind a producer-allocated id to a node, rejecting everything the
+   * proto's id rules forbid:
+   *
+   * - `ROOT_ID` — the mount root is the embedder's node, never one the
+   *   producer may (re-)name.
+   * - an id that is CURRENTLY registered. The proto says ids are "never
+   *   reused" within a stream, but `remove` frees the subtree's nodes and
+   *   this receiver keeps no record of ids it has forgotten (and ids are
+   *   not required to be monotonic, so a high-water mark would reject
+   *   legal streams). So the detectable half of the rule is enforced and
+   *   the other half is not: re-registering a live id throws; reusing an
+   *   id freed by an earlier `remove` is a protocol violation this
+   *   receiver cannot see.
+   * - a node that already carries an id (aliasing). Two ids for one node
+   *   would make `remove` free only one of them and leave the other
+   *   pointing into a detached tree; `bind-path` with an empty path onto
+   *   an already-registered node is the way to ask for it.
+   */
+  #register(id: number, node: Node): void {
+    if (id === ROOT_ID) {
+      throw new Error(`stream-dom: id ${ROOT_ID} is the mount root`);
+    }
+    if (this.#nodes.has(id)) {
+      throw new Error(`stream-dom: node id ${id} is already registered`);
+    }
+    const existing = this.#ids.get(node);
+    if (existing !== undefined) {
+      throw new Error(
+        `stream-dom: node id ${id} would alias node ${existing}`,
+      );
+    }
+    this.#bind(id, node);
   }
 
   #resolve(id: number): Node {
@@ -104,6 +158,25 @@ export class NativeDomReceiver implements Receiver, FrameSink {
 
   #str(ref: number): string {
     return this.listeners.stringFor(ref);
+  }
+
+  /** `#resolve` plus the op's node-type precondition. Without it
+   * `setAttribute` would fail with an incidental `TypeError` on a text
+   * node and `setProperty` would quietly install an expando. */
+  #element(opName: string, id: number): Element {
+    const node = this.#resolve(id);
+    if (node.nodeType !== ELEMENT_NODE) {
+      throw new Error(`stream-dom: ${opName} target ${id} is not an element`);
+    }
+    return node as Element;
+  }
+
+  /** The mount root is not a valid target for a structural op — see
+   * `ROOT_ID`. */
+  #rejectRoot(opName: string, id: number): void {
+    if (id === ROOT_ID) {
+      throw new Error(`stream-dom: ${opName} may not target the mount root`);
+    }
   }
 
   // -- interning / creation -------------------------------------------------
@@ -140,6 +213,17 @@ export class NativeDomReceiver implements Receiver, FrameSink {
     parentId: number | undefined,
     anchorId: number | undefined,
   ): Node {
+    // The mount root is nobody's sibling. An anchor names the node the
+    // insert lands beside, so an anchor of 0 addresses the EMBEDDER's
+    // container — and with `parent` omitted the container becomes the
+    // implied parent silently, putting a producer node outside the mount.
+    // See ROOT_ID. (With `parent` named this is already caught below as a
+    // parent/anchor disagreement; rejecting it here says why.)
+    if (anchorId === ROOT_ID) {
+      throw new Error(
+        `stream-dom: ${opName} may not use the mount root as an anchor`,
+      );
+    }
     if (parentId === undefined && anchorId === undefined) {
       throw new Error(`stream-dom: ${opName} has neither parent nor anchor`);
     }
@@ -189,6 +273,7 @@ export class NativeDomReceiver implements Receiver, FrameSink {
     id: number,
     anchorId: number | undefined,
   ): void {
+    this.#rejectRoot("insert-before", id);
     if (anchorId === id) return; // no-op — see RemoteDomTranscoder's doc.
     const parent = this.#resolveInsertParent(
       "insert-before",
@@ -210,6 +295,7 @@ export class NativeDomReceiver implements Receiver, FrameSink {
     id: number,
     anchorId: number,
   ): void {
+    this.#rejectRoot("insert-after", id);
     if (anchorId === id) return; // no-op — see RemoteDomTranscoder's doc.
     const parent = this.#resolveInsertParent(
       "insert-after",
@@ -227,30 +313,49 @@ export class NativeDomReceiver implements Receiver, FrameSink {
   }
 
   remove(id: number): void {
+    this.#rejectRoot("remove", id);
     const node = this.#resolve(id);
     node.parentNode?.removeChild(node);
     this.#forgetSubtree(node);
   }
 
-  /** Forget `node` and its descendants by walking the REMOVED subtree
-   * (`node.childNodes` recursion), never by scanning the id map: a 10k-row
-   * clear removes one subtree of ~10k nodes, and the id map can hold many
-   * unrelated ids, so scanning it per removed node would be
-   * O(ids × nodes) instead of O(nodes). The reverse map (`#ids`) makes
-   * each node's own forgetting O(1). */
-  #forgetSubtree(node: Node): void {
-    const id = this.#ids.get(node);
-    if (id !== undefined) {
-      this.#nodes.delete(id);
-      this.#ids.delete(node);
+  /** Forget `node` and its descendants by walking the REMOVED subtree,
+   * never by scanning the id map: a 10k-row clear removes one subtree of
+   * ~10k nodes, and the id map can hold many unrelated ids, so scanning it
+   * per removed node would be O(ids × nodes) instead of O(nodes). The
+   * reverse map (`#ids`) makes each node's own forgetting O(1). The walk
+   * is an explicit stack rather than recursion: a legal-but-deep tree
+   * (tens of thousands of nested nodes, which no rule forbids a producer
+   * from building) would otherwise overflow the JS stack on removal. */
+  #forgetSubtree(root: Node): void {
+    const stack: Node[] = [root];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      const id = this.#ids.get(node);
+      if (id !== undefined) {
+        this.#nodes.delete(id);
+        this.#ids.delete(node);
+      }
+      for (const child of node.childNodes) stack.push(child);
     }
-    for (const child of node.childNodes) this.#forgetSubtree(child);
   }
 
   // -- leaf ops -------------------------------------------------------------
 
   setText(id: number, text: string): void {
-    (this.#resolve(id) as CharacterData).data = text;
+    const node = this.#resolve(id);
+    // proto SetText: "Set a text node's content". `CharacterData` is the
+    // only thing with a `data` property; on an `Element` the assignment
+    // this used to do unconditionally installed a silent expando instead
+    // of rendering anything. Text and comment nodes are the two this
+    // receiver ever creates (`create-text`, `create-placeholder`) and the
+    // two a template arena can produce.
+    if (node.nodeType !== TEXT_NODE && node.nodeType !== COMMENT_NODE) {
+      throw new Error(
+        `stream-dom: set-text target ${id} is not a text or comment node`,
+      );
+    }
+    (node as CharacterData).data = text;
   }
 
   setAttribute(
@@ -259,7 +364,7 @@ export class NativeDomReceiver implements Receiver, FrameSink {
     ns: number | undefined,
     value: string | undefined,
   ): void {
-    const el = this.#resolve(id) as Element;
+    const el = this.#element("set-attribute", id);
     const attrName = this.#str(name);
     if (value === undefined) {
       if (ns === undefined) el.removeAttribute(attrName);
@@ -271,7 +376,10 @@ export class NativeDomReceiver implements Receiver, FrameSink {
   }
 
   setProperty(id: number, name: number, value: PropertyValue): void {
-    const el = this.#resolve(id) as unknown as Record<string, unknown>;
+    const el = this.#element("set-property", id) as unknown as Record<
+      string,
+      unknown
+    >;
     const propName = this.#str(name);
     // An absent value "deletes / sets undefined" (proto SetProperty). On
     // the DOM that must be `null`, not `undefined`: the string-typed
@@ -347,6 +455,9 @@ export class NativeDomReceiver implements Receiver, FrameSink {
       }
       node = next;
     }
+    // `#register` is what rejects `id == 0` and the aliasing case here: an
+    // empty `path` (or one that walks back onto an already-bound interior
+    // node) resolves to a node that already carries an id.
     this.#register(id, node);
   }
 

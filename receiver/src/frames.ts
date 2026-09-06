@@ -457,6 +457,16 @@ function decodeTemplateNode(
   return node;
 }
 
+/** Hard ceiling on one frame's length prefix. A `uint32` varint can
+ * announce up to 4 GiB, and `#drain` would otherwise buffer every
+ * subsequent chunk forever waiting for bytes a hostile (or broken)
+ * producer never sends — an unbounded-memory hang rather than an abort.
+ * 16 MiB is far above any frame a real producer emits (the largest is a
+ * `RegisterTemplate` arena) and far below a memory problem; over it the
+ * decoder throws immediately, which aborts the stream
+ * (docs/design.md "Policy", "The seam"). */
+export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
 /**
  * Feeds arbitrary byte chunks (a frame may straddle chunks per
  * docs/design.md: "Rendezvous copies split at byte granularity") and
@@ -515,10 +525,19 @@ export class FrameDecoder {
         if (err instanceof TruncatedError) break;
         throw err;
       }
+      if (len > MAX_FRAME_BYTES) {
+        throw new Error(
+          `stream-dom: frame length ${len} exceeds MAX_FRAME_BYTES (${MAX_FRAME_BYTES})`,
+        );
+      }
       if (offset + len > buf.length) {
         offset = lenStart; // Frame body straddles the buffer — wait for more.
         break;
       }
+      // Only the length probe above is allowed to treat a `TruncatedError`
+      // as "wait for more". Inside a frame whose bytes are all here, a
+      // truncated sub-message is a malformed frame and propagates out of
+      // `push`, aborting the stream.
       const frame = new Reader(buf, offset, offset + len);
       offset += len;
       this.#decodeFrame(frame);

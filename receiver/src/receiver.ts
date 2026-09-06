@@ -64,8 +64,20 @@ export class ListenerRegistry {
     this.#strings.set(id, s);
   }
 
+  /** Resolve an interned slot. Throws on an unknown ref rather than
+   * returning `""`: interning is define-before-use
+   * (proto/stream-dom.proto: "An Intern precedes the first use of its slot
+   * in the same stream"), so an unresolved ref is a malformed stream, and
+   * an empty string would silently become an element with no tag name or
+   * an attribute called "". Re-defining a live slot IS legal and is not
+   * checked here — the proto's `Intern` reads "Define (or overwrite)
+   * interned slot `id`". */
   stringFor(ref: number): string {
-    return this.#strings.get(ref) ?? "";
+    const s = this.#strings.get(ref);
+    if (s === undefined) {
+      throw new Error(`stream-dom: unknown string ref ${ref}`);
+    }
+    return s;
   }
 
   /** The reverse of `internString`: the ref a string was interned under,

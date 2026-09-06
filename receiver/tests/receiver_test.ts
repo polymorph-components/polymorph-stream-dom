@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { ListenerRegistry } from "../src/receiver.ts";
 import type { Listener } from "../src/frames.ts";
 
@@ -62,7 +62,8 @@ Deno.test("ListenerRegistry: string interning (internString/stringFor/refFor)", 
   registry.internString(2, "hashchange");
   assertEquals(registry.stringFor(1), "click");
   assertEquals(registry.stringFor(2), "hashchange");
-  assertEquals(registry.stringFor(99), ""); // unknown ref -> empty string
+  // Unknown ref -> throws: an unresolved str-ref is a protocol violation.
+  assertThrows(() => registry.stringFor(99), Error, "unknown string ref 99");
   assertEquals(registry.refFor("hashchange"), 2);
   assertEquals(registry.refFor("nope"), undefined);
 });
