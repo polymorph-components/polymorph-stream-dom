@@ -278,6 +278,6 @@ message EventPayload {
     KeyboardData keyboard = 2;
     FormData form = 3;
     // pointer, wheel, drag, touch, scroll, composition, animation,
-    // transition, image, resize, visible: to be ported.
+    // transition, image, resize, visible, frame: to be ported.
   }
 }

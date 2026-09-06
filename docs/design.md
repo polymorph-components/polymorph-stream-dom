@@ -255,6 +255,27 @@ one browser task depends on the runtime resuming the writer's fiber
 synchronously when its partial write completes. Verify in the embedding
 before relying on it.
 
+There is one kind of commit. The browser already supplies the timing
+distinctions frameworks expose (React `flushSync` vs batched, Svelte
+`flushSync` vs microtask, Vue `flush: sync | pre | post`): nothing painted
+mid-task is visible, so "apply now" and "apply at the end of the
+microtask" are the same thing to the DOM, and a receiver's only real
+timing choice is whether to hold a committed batch until the next
+animation frame. That is allowed, under an invariant: **queries observe
+every committed batch.** A receiver that defers application flushes before
+answering `get-client-rect` or any other read, or a producer's
+write-commit-measure sequence silently reads stale layout.
+
+Two things that look like commit kinds are not:
+
+- A full snapshot for resync (open question 5) is an ordinary batch after
+  `reset`, as rrweb's periodic "checkout" is an ordinary full snapshot in
+  the incremental stream.
+- A batch to be applied as a `document.startViewTransition` is the one
+  case a receiver cannot infer: it must know before the first mutation. It
+  is a hint at the batch *start*, not a commit variant — see open
+  question 11.
+
 Transformers preserve the flag. One that drops the frame carrying it (a
 `create … remove` pair whose `remove` ended the batch) re-emits it on the
 batch's last surviving frame, or on an op-less frame if nothing survives.
@@ -284,9 +305,8 @@ Consequences:
   path ops relative to a stack top mean nothing without replaying the
   stack; a coalescer would have to be an interpreter. Dioxus's adapter
   resolves its stack producer-side, which is trivial.
-- **Producer allocates ids** (`u32`; `0` is the mount root), like Wayland's
-  client-allocated object ids and for the same reason: no round trip to
-  learn a name. **Ids are never reused within a stream.** Reuse after
+- **Producer allocates ids** (`u32`; `0` is the mount root): no round trip
+  to learn a name. **Ids are never reused within a stream.** Reuse after
   `remove` would be safe on the forward channel (stream order), but the
   reverse channel is not ordered against it: across a worker or network,
   `handle-event(target=7)` for a node the producer has since removed can
@@ -457,12 +477,16 @@ key, coordinates, form data on submit, `relatedTarget` as an id). The
 same bytes cross the worker and network tiers, so there is one definition
 of every family and no in-process/remote split. A `list<u8>` here is fine
 where a `list` per batch was not: one small message per call, not a
-batch. Files and drag data are resources, not copies. Two families are
-synthesized by the receiver from observers rather than DOM events
-(`resize`, `visible`), and `mounted` is synthetic: fired once per
-registered element after the batch that created it is fully applied.
-(Families and synthetics borrowed from polyengine-dioxus; contents to be
-ported.)
+batch. Files and drag data are resources, not copies. Three families are
+synthesized by the receiver rather than taken from DOM events: `resize`
+and `visible` from observers, and `frame` from `requestAnimationFrame` —
+a producer has no rAF of its own, and anything that animates needs the
+receiver to say when the last commit reached the screen and the next one
+is due. Subscribed on the mount root like any listener, so a producer
+that is not animating pays nothing. `mounted` is synthetic too: fired once
+per registered element after the batch that created it is fully applied.
+(Families and synthetics borrowed from polyengine-dioxus, `frame` added;
+contents to be ported.)
 
 `queries` keep typed WIT signatures: they are RPC with small fixed return
 shapes (`rect`, `point`, `size`), typing the call is free in-process, and
@@ -715,18 +739,18 @@ a DOM. This protocol is a command stream, not an observer, but its
 structural core is kept isomorphic to `MutationRecord` (see
 Architecture) so recording and replay are trivial.
 
-### Structural ancestors
+### Ancestors outside the browser
 
-**Wayland**: client-allocated object ids, requests batched and made
-visible atomically at `wl_surface.commit`, events back on the same
-socket — the same shape as this design, chosen for the same round-trip
-reasons; X11 with server-allocated ids is the cautionary contrast.
-**React Native's old bridge** (`UIManager.createView` / `updateView` /
-`manageChildren`, batched, async) and *why Fabric replaced it* — layout
-reads and event latency across an async boundary — is the cautionary
-tale for the network tier; Blazor Server hit the same wall. **Emscripten
-`PROXY_TO_PTHREAD`** and OffscreenCanvas are the "wasm off the main
-thread queues its DOM calls" precedent inside the wasm world itself.
+Listed for shape only; this protocol's authority is the browser DOM.
+**Wayland** (client-allocated ids, batched requests applied atomically at
+`commit`, events on the same socket) is the same shape with a display
+server in place of a DOM. **React Native's old bridge**
+(`UIManager.createView` / `updateView` / `manageChildren`, batched, async)
+and *why Fabric replaced it* — layout reads and event latency across an
+async boundary — is the cautionary tale for the network tier; Blazor
+Server hit the same wall. **Emscripten `PROXY_TO_PTHREAD`** and
+OffscreenCanvas are the "wasm off the main thread queues its DOM calls"
+precedent inside the wasm world itself.
 
 ## Prior measurements worth knowing
 
@@ -804,3 +828,11 @@ definition.
     transformer, and remote-dom's reason for existing. Decide whether the
     producer is trusted by definition or whether a `sanitize` transformer
     is part of the reference set.
+11. **View-transition batches.** A receiver must call
+    `document.startViewTransition` before the first mutation of a batch
+    that should animate, so the producer has to say so at the batch start.
+    Most batches are not transitions, so a rare `batch-hint` op emitted
+    only for non-default batches costs nothing on the common path and does
+    not reintroduce a per-batch frame. Producers will ask (React
+    `<ViewTransition>`, Svelte and Vue navigation hooks); design it when
+    one does.
