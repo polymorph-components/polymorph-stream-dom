@@ -114,11 +114,22 @@ interface mutations {
   /// Deep-clone template `tmpl`'s root number `root` as a detached node `id`.
   record clone-template { tmpl: u16, root: u16, id: node-id }
 
-  /// Bind `id` to the node reached from `root` by walking child indices in
-  /// `path`. Used for the interior nodes of a cloned template and for
-  /// prerendered markup during hydration (`root = 0`). Self-contained: the
-  /// root is named, not implied.
+  /// Bind `id` to the interior node of a cloned template reached from
+  /// `root` by walking child indices in `path`. Positions are reliable
+  /// here because the producer built the tree. Self-contained: the root is
+  /// named, not implied.
   record bind-path { root: node-id, path: list<u8>, id: node-id }
+
+  // --- Hydration ---
+
+  /// Bind `id` to the prerendered node the server-side render stamped with
+  /// `key` (an attribute on elements, a comment beside text nodes and
+  /// placeholders; the syntax is an SSR/receiver agreement, not part of
+  /// this stream). By marker rather than by position because the HTML
+  /// parser reshapes the served tree — `<tbody>` insertion, `<p>`
+  /// auto-close, adjacent text merged — so child indices from the mount
+  /// root are not trustworthy. A missing key is a receiver error.
+  record bind-marker { key: u32, id: node-id }
 
   variant operation {
     intern(intern),
@@ -137,6 +148,7 @@ interface mutations {
     register-template(register-template),
     clone-template(clone-template),
     bind-path(bind-path),
+    bind-marker(bind-marker),
     /// Batch boundary. A signal, not a buffering instruction: after-commit
     /// work (synthetic `mounted`, islands) runs here; a transformer that
     /// merges batches emits one.
@@ -207,7 +219,7 @@ world producer {
 
   /// Mount. `hydrate = true` means the mount root already holds this
   /// producer's prerendered markup: the first batch binds ids with
-  /// `bind-path` and creates no nodes.
+  /// `bind-marker` and creates no nodes.
   ///
   /// Returning the stream makes the channel's lifecycle structural: it
   /// exists iff the producer started, once, tied to this instance. The

@@ -188,11 +188,11 @@ WIT forbids recursive types, so a template is an arena: a flat pre-order
 admits malformed index graphs a recursive type could not express;
 receivers validate rather than trust. (Borrowed from polyengine-dioxus.)
 
-Binding ids to nodes the producer did not create — interior nodes of a
-cloned template, or prerendered markup being hydrated — is one op:
-`bind-path(root, path, id)`, a child-index walk from an explicit root.
-Self-contained (the root is named, not implied by a stack), so a
-transformer can treat it as opaque bookkeeping.
+Interior nodes of a cloned template get ids via `bind-path(root, path,
+id)`, a child-index walk from an explicit root. Positions are reliable
+here because the producer built the tree itself. Self-contained (the root
+is named, not implied by a stack), so a transformer can treat it as opaque
+bookkeeping.
 
 ### Reads are `async`-typed host imports
 
@@ -218,13 +218,32 @@ inside the producer; the escape hatch is a host-side island — a node the
 receiver hands to receiver-side code — analogous to React Native's native
 components. Shape TBD; listed under open questions.
 
-### Hydration is push
+### Hydration is push, and binds by marker
 
-The producer asserts which ids bind to which prerendered nodes
-(`bind-path` from the mount root) and emits no node-creating ops for the
-initial render. A mismatch is a receiver-side error, not silent repair.
-Pull-style hydration (React's: read the DOM and compare) does not stream
-and is out of scope.
+The server already sent HTML; on first render the producer must say "my id
+7 *is* that existing node" instead of creating one. It emits no
+node-creating ops for the initial render and asserts the bindings. A
+mismatch is a receiver-side error, not silent repair. Pull-style hydration
+(React's: read the DOM and compare) does not stream and is out of scope.
+
+Bindings are by **marker**, not by position: `bind-marker(key, id)` binds
+`id` to the node the server-side render stamped with `key` (an attribute
+on elements, a comment beside text nodes and placeholders). Positional
+binding from the mount root would require the browser's DOM to have
+exactly the shape the producer rendered, and the HTML parser routinely
+breaks that for reasons outside anyone's control: it inserts `<tbody>`
+inside `<table>`, auto-closes `<p>` before block elements, and merges
+adjacent text nodes, so `"Hello, " + name` is two nodes in the producer's
+model and one in the DOM. Whitespace between server-emitted tags and
+extension-injected nodes do the same. Any of these shifts every later
+index onto the wrong node with no good error. Markers survive all of it
+and make a missing node a precise report. This is why every shipping
+framework uses at least comment markers (React `<!-- -->` between adjacent
+text, Vue/Svelte `<!--[-->`…`<!--]-->`, Solid `data-hk`, Dioxus
+`data-node-hydration` + `<!--node-idN-->`).
+
+The marker syntax is an agreement between the SSR renderer and the
+receiver, not part of the op stream; the op carries only the key.
 
 ## Events
 
@@ -342,9 +361,10 @@ looking like a deadlock.
 
 Left behind: the stack machine (`push-root`, `m` counts, path ops relative
 to stack top); Dioxus `ElementId` slab semantics as protocol semantics;
-host-decided attribute-vs-property; `hydrate` as a Dioxus-marker-specific
-op (generalized to `bind-path`); the `WriteMutations` trait as the
-vocabulary's definition.
+host-decided attribute-vs-property; `hydrate` as an ordered id list whose
+node lookup is implicit in the receiver's marker walk (replaced by explicit
+per-node `bind-marker`); the `WriteMutations` trait as the vocabulary's
+definition.
 
 ## Open questions
 
@@ -358,8 +378,8 @@ vocabulary's definition.
 3. **Islands.** Shape of `mount-foreign(id, kind, props)` or equivalent;
    who owns the node's lifecycle; how events cross back.
 4. **Coalescer window and index.** K and the key shape; interaction with
-   `bind-path` and template ops (treat as opaque, never drop unless the
-   root is removed?).
+   `bind-path`, `bind-marker` and template ops (treat as opaque, never
+   drop unless the root is removed?).
 5. **Resync.** `reset` semantics and whether a full snapshot is a special
    batch or the normal initial-mount batch replayed.
 6. **Byte encoding.** Whether a `stream<u8>` transformer output is needed at
