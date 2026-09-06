@@ -10,7 +10,8 @@
 /// (something owning a DOM) applies them. Transformers may sit between
 /// with the shape `func(in: stream<u8>) -> stream<u8>`. The stream is an
 /// unbuffered rendezvous channel of bytes — batches are framed by the
-/// `Commit` op, and the transport knows neither frames nor batches.
+/// `commit` flag on a frame, and the transport knows neither frames nor
+/// batches.
 package polymorph:stream-dom@0.1.0;
 
 interface types {
@@ -74,7 +75,7 @@ world producer {
   /// interned `name`. `target` and `name` are plain so the guest can route
   /// without decoding; `payload` is an encoded `EventPayload`. `mounted`
   /// is synthetic: the receiver fires it once per registered element after
-  /// the `Commit` of the batch that created it, with an empty payload.
+  /// the commit of the batch that created it, with an empty payload.
   export handle-event: async func(
     target: node-id,
     name: str-ref,

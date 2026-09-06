@@ -115,7 +115,7 @@ producer adapter ──▶ stream<u8> ──▶ [transformers]* ──▶ receiv
 - The vocabulary has two layers. *Definitional* ops (`intern`,
   `register-template`, `clone-template`, `bind-path`) can be compiled away
   by a transformer into the *structural core* (`create-*`,
-  `insert-before`, `remove`, `set-*`, listeners, `commit`). The core is
+  `insert-before`, `remove`, `set-*`, listeners, the `commit` flag). The core is
   isomorphic to a `MutationRecord` stream, so a minimal receiver is small,
   a recorder is a `MutationObserver`, and during bring-up an expand
   transformer plus a thin shim can drive an existing browser receiver
@@ -225,7 +225,7 @@ Rendezvous copies split at byte granularity, so a frame may straddle two
 reads; decoders keep the partial tail. Producers typically encode a whole
 batch into one buffer and issue one write, but nothing depends on it.
 
-### Batches are framed by a `commit` op, not by the transport
+### Batches are framed by a `commit` flag, not by the transport
 
 `commit` is a boundary signal, not a buffering instruction. Its uses:
 
@@ -233,6 +233,17 @@ batch into one buffer and issue one write, but nothing depends on it.
    `mounted`, refs, host-side islands.
 2. Ack/coalescing granularity on a remote hop.
 3. Recording and replay.
+
+It is a `bool` on `Frame`, set on the last frame of a batch, rather than
+an op of its own. Fine-grained producers emit many one- or two-op batches
+(a signal flush per microtask), where a separate commit frame would be a
+third to a half of all frames; the flag costs two bytes and no dispatch.
+An empty batch (after-commit work with nothing to mutate; an ack tick on a
+remote hop) is a frame with `commit` set and no op — legal only in that
+case, so there is one representation of a boundary, not two. Ops are
+applied before the flag is honored, whatever the field order inside the
+frame: proto parsers accept any order, so a receiver cannot assume
+`commit` decodes last even though encoders write it that way.
 
 A receiver *may* buffer until `commit` to guarantee no half-applied frame;
 that is receiver policy. It is only needed when the producer is slower
@@ -244,9 +255,12 @@ one browser task depends on the runtime resuming the writer's fiber
 synchronously when its partial write completes. Verify in the embedding
 before relying on it.
 
-A transformer that merges batches emits one `commit`; intermediate states
-that never reached the receiver never existed for it, which matches what
-frameworks do internally when they batch state updates.
+Transformers preserve the flag. One that drops the frame carrying it (a
+`create … remove` pair whose `remove` ended the batch) re-emits it on the
+batch's last surviving frame, or on an op-less frame if nothing survives.
+One that merges batches sets it once, on the final frame; intermediate
+states that never reached the receiver never existed for it, which matches
+what frameworks do internally when they batch state updates.
 
 ### Every op is addressable and self-contained
 

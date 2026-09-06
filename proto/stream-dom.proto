@@ -26,31 +26,41 @@ syntax = "proto3";
 
 package polymorph.stream_dom;
 
-// One op. The oneof case is the op kind; a receiver that does not know the
-// case skips the frame.
+// One frame: at most one op, plus the batch-boundary flag.
+//
+// `commit` marks the last frame of a batch. It is a signal, not a
+// buffering instruction: after-commit work (synthetic `mounted`, islands)
+// runs once the frame's op, if any, is applied. A frame with no op set is
+// legal only when it commits (an empty batch). A transformer that drops
+// the frame carrying the flag re-emits it on the batch's last surviving
+// frame, or on an op-less frame if none survives; one that merges batches
+// sets it once, on the final frame. Receivers honor the flag after the op
+// whatever the field order in the frame.
+//
+// Field numbers 1-15 encode as one tag byte, 16+ as two. `commit` rides on
+// the hottest frames and takes 1; ops are ordered roughly by frequency so
+// the two-byte tag lands on a rare one. A receiver that does not know an
+// op case skips the frame (still honoring `commit`).
 message Frame {
+  bool commit = 1;
   oneof op {
-    Intern intern = 1;
-    CreateElement create_element = 2;
-    CreateText create_text = 3;
-    // A comment node used as an insertion anchor for fragments.
-    CreatePlaceholder create_placeholder = 4;
-    InsertBefore insert_before = 5;
+    InsertBefore insert_before = 2;
+    SetText set_text = 3;
+    SetAttribute set_attribute = 4;
+    SetProperty set_property = 5;
+    CreateElement create_element = 6;
+    CreateText create_text = 7;
     // Detach and free the subtree rooted at this id.
-    Remove remove = 6;
-    SetText set_text = 7;
-    SetAttribute set_attribute = 8;
-    SetProperty set_property = 9;
-    AddListener add_listener = 10;
-    RemoveListener remove_listener = 11;
-    RegisterTemplate register_template = 12;
-    CloneTemplate clone_template = 13;
-    BindPath bind_path = 14;
-    BindMarker bind_marker = 15;
-    // Batch boundary. A signal, not a buffering instruction: after-commit
-    // work (synthetic `mounted`, islands) runs here; a transformer that
-    // merges batches emits one.
-    Commit commit = 16;
+    Remove remove = 8;
+    CloneTemplate clone_template = 9;
+    BindPath bind_path = 10;
+    // A comment node used as an insertion anchor for fragments.
+    CreatePlaceholder create_placeholder = 11;
+    AddListener add_listener = 12;
+    RemoveListener remove_listener = 13;
+    Intern intern = 14;
+    RegisterTemplate register_template = 15;
+    BindMarker bind_marker = 16;
   }
 }
 
@@ -226,8 +236,6 @@ message BindMarker {
   uint32 key = 1;
   uint32 id = 2;
 }
-
-message Commit {}
 
 // --- Events ---
 //
