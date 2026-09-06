@@ -151,7 +151,10 @@ fn attribute_writes(frames: &[proto::Frame], name_slot: u32) -> Vec<Option<&str>
     frames
         .iter()
         .filter_map(|f| match &f.op {
-            Some(Op::SetAttribute(a)) if a.name == name_slot => Some(a.value.as_deref()),
+            Some(Op::SetAttribute(a)) if a.name == name_slot => Some(match &a.value {
+                Some(proto::set_attribute::Value::Text(s)) => Some(s.as_str()),
+                _ => None,
+            }),
             _ => None,
         })
         .collect()

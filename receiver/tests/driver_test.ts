@@ -8,10 +8,15 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { parseHTML } from "linkedom";
 import { createDriver } from "../src/driver.ts";
 import type { ProducerEventTarget } from "../src/driver.ts";
+import { PROTOCOL_VERSION } from "../src/frames.ts";
 import { PolicyError } from "../src/policy.ts";
 import type { Policy } from "../src/policy.ts";
 import { Writer } from "../src/proto.ts";
-import { SURFACE_V1 } from "../src/policy.ts";
+
+/** A policy that allows every op — the baseline these tests vary from. */
+function allowAll(extra?: Partial<Policy>): Policy {
+  return { version: PROTOCOL_VERSION, check: () => undefined, ...extra };
+}
 
 // -- harness ----------------------------------------------------------------
 
@@ -245,39 +250,7 @@ Deno.test("Driver: a bubbling click listener fires handleEvent with the right ta
   const [target, nameRef, payload] = calls[0];
   assertEquals(target, { kind: "node", value: 10 });
   assertEquals(nameRef, CLICK);
-  assertEquals(payload.length > 0, true); // full policy: mouse payload encoded
-
-  withGlobalWindow(win, () => driver.dispose());
-});
-
-Deno.test("Driver: a policy whose events omit EventPayload.mouse encodes an empty payload", async () => {
-  const { win, root } = fixture();
-  const calls: Uint8Array[] = [];
-  const policy: Policy = {
-    accept: SURFACE_V1.accept,
-    events: SURFACE_V1.events.filter((f) => f !== "EventPayload.mouse"),
-    queries: SURFACE_V1.queries,
-  };
-  const driver = createDriver({
-    root,
-    policy,
-    handleEvent: (_t, _n, payload) => {
-      calls.push(payload);
-    },
-  });
-  await pushAndAwaitCommit(driver, concat(basicFrames()));
-  await pushAndAwaitCommit(driver, addClickListenerFrame());
-
-  const div = root.querySelector("div")!;
-  div.dispatchEvent(
-    new (win as unknown as { Event: typeof Event }).Event(
-      "click",
-      { bubbles: true },
-    ),
-  );
-
-  assertEquals(calls.length, 1);
-  assertEquals(calls[0].length, 0);
+  assertEquals(payload.length > 0, true); // click -> mouse payload
 
   withGlobalWindow(win, () => driver.dispose());
 });
@@ -310,90 +283,70 @@ Deno.test("Driver: prevent_default is honored even though handleEvent does nothi
 
 // -- 4. queries gated ----------------------------------------------------------
 
-Deno.test("Driver: getClientRect refuses under a policy that omits it and answers with it declared", async () => {
-  // No policy at all means "no policy" allows everything (policy.ts
-  // `queryAllowed`'s "undeclared -> allow"), so refusal needs an EXPLICIT
-  // policy whose `queries` omits `get-client-rect`.
+Deno.test("Driver: policy.query gates individual queries; absent means allow", async () => {
+  // A policy with no `query` method allows every import (policy.ts:
+  // "Absent means allow"), so a refusal needs an EXPLICIT refusing hook.
   const { win, root } = fixture();
-  const refusing: Policy = {
-    accept: SURFACE_V1.accept,
-    events: SURFACE_V1.events,
-    queries: [],
-  };
-  const noPolicy = createDriver({
+  const gated = createDriver({
     root,
-    policy: refusing,
+    policy: allowAll({ query: (name) => name !== "set-focus" }),
     handleEvent: () => {},
   });
-  await pushAndAwaitCommit(noPolicy, concat(basicFrames()));
-  assertEquals(noPolicy.queries.getClientRect(10), undefined);
-  withGlobalWindow(win, () => noPolicy.dispose());
+  await pushAndAwaitCommit(gated, concat(basicFrames()));
+  assertEquals(gated.queries.setFocus(10, true), false);
+  // ...while a query the same policy does not refuse still answers.
+  assertEquals(gated.queries.getClientRect(10), {
+    origin: { x: 0, y: 0 },
+    size: { width: 0, height: 0 },
+  });
+  withGlobalWindow(win, () => gated.dispose());
 
   const { win: win2, root: root2 } = fixture();
-  const policy: Policy = {
-    accept: SURFACE_V1.accept,
-    events: SURFACE_V1.events,
-    queries: ["get-client-rect"],
-  };
-  const withPolicy = createDriver({
+  const open = createDriver({
     root: root2,
-    policy,
+    policy: allowAll(),
     handleEvent: () => {},
   });
-  await pushAndAwaitCommit(withPolicy, concat(basicFrames()));
-  const rect = withPolicy.queries.getClientRect(10);
-  assertEquals(rect, { origin: { x: 0, y: 0 }, size: { width: 0, height: 0 } });
-  withGlobalWindow(win2, () => withPolicy.dispose());
-});
-
-Deno.test("Driver: setFocus refuses under a policy that omits it and answers with it declared", async () => {
-  const { win, root } = fixture();
-  const refusing: Policy = {
-    accept: SURFACE_V1.accept,
-    events: SURFACE_V1.events,
-    queries: [],
-  };
-  const noPolicy = createDriver({
-    root,
-    policy: refusing,
-    handleEvent: () => {},
+  await pushAndAwaitCommit(open, concat(basicFrames()));
+  assertEquals(open.queries.setFocus(10, true), true);
+  assertEquals(open.queries.getClientRect(10), {
+    origin: { x: 0, y: 0 },
+    size: { width: 0, height: 0 },
   });
-  await pushAndAwaitCommit(noPolicy, concat(basicFrames()));
-  assertEquals(noPolicy.queries.setFocus(10, true), false);
-  withGlobalWindow(win, () => noPolicy.dispose());
-
-  const { win: win2, root: root2 } = fixture();
-  const policy: Policy = {
-    accept: SURFACE_V1.accept,
-    events: SURFACE_V1.events,
-    queries: ["set-focus"],
-  };
-  const withPolicy = createDriver({
-    root: root2,
-    policy,
-    handleEvent: () => {},
-  });
-  await pushAndAwaitCommit(withPolicy, concat(basicFrames()));
-  assertEquals(withPolicy.queries.setFocus(10, true), true);
-  withGlobalWindow(win2, () => withPolicy.dispose());
+  withGlobalWindow(win2, () => open.dispose());
 });
 
 // -- 5. abort semantics ---------------------------------------------------------
 
-Deno.test("Driver: a policy violation (undeclared field) throws PolicyError", () => {
+Deno.test("Driver: a policy rejection throws PolicyError out of push", () => {
   const { win, root } = fixture();
-  const policy: Policy = {
-    // Missing "Frame.create_element" — the frame sequence below uses it.
-    accept: SURFACE_V1.accept.filter((f) => f !== "Frame.create_element"),
-    events: SURFACE_V1.events,
-    queries: SURFACE_V1.queries,
-  };
+  const policy = allowAll({
+    check: (op) =>
+      op.op === "createElement"
+        ? "div is not in the host vocabulary"
+        : undefined,
+  });
   const driver = createDriver({ root, policy, handleEvent: () => {} });
   assertThrows(
     () => driver.push(concat(basicFrames())),
     PolicyError,
+    "div is not in the host vocabulary",
   );
   withGlobalWindow(win, () => driver.dispose());
+});
+
+Deno.test("Driver: a policy pinning another protocol version is refused at construction", () => {
+  const { root } = fixture();
+  assertThrows(
+    () =>
+      createDriver({
+        root,
+        policy: { version: PROTOCOL_VERSION + 1, check: () => undefined },
+        handleEvent: () => {},
+      }),
+    Error,
+    `policy pins protocol version ${PROTOCOL_VERSION + 1}`,
+  );
 });
 
 Deno.test("Driver: an unknown node id throws", () => {

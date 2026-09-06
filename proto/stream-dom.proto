@@ -7,11 +7,15 @@
 // in both places, except that the observer payloads carry a `Rect` / `Size`
 // structurally equal to the `queries` records.
 //
+// PROTOCOL VERSION: 1
+//
 // Stream layout: standard length-delimited messages — varint byte length,
-// then one Frame, repeated. No header. Additive change (new oneof cases,
-// new fields) needs no version bump; receivers skip what they do not know.
-// Changing an existing field does bump the package version, and
-// instantiation is digest-checked.
+// then one Frame, repeated. No header. Additive change (a new oneof case,
+// field or enum value) bumps PROTOCOL VERSION above; changing an existing
+// field also bumps the package version, and instantiation is
+// digest-checked. An open receiver (no policy) skips wire content it does
+// not know; a receiver enforcing a policy rejects it, and a policy pins
+// the version it was written against — docs/design.md "Policy".
 //
 // Invariants every producer upholds and every transformer preserves:
 // - Every op names its target(s) explicitly. No implicit stack, cursor or
@@ -129,12 +133,18 @@ message SetText {
 }
 
 // Set or remove (no `value`) an attribute. The producer adapter decides
-// attribute vs property using its framework's own table.
+// attribute vs property using its framework's own table. `asset` is an
+// opaque handle the receiver materializes into a URL (a content hash by
+// convention, but the receiver's `resolveAsset` decides); the producer
+// never names a URL through it — docs/design.md "Assets".
 message SetAttribute {
   uint32 id = 1;
   uint32 name = 2;
   optional uint32 ns = 3;
-  optional string value = 4;
+  oneof value {
+    string text = 4;
+    bytes asset = 5;
+  }
 }
 
 // Set a DOM property (`value`, `checked`, `innerHTML`, ...) to a typed
@@ -198,7 +208,10 @@ message RemoveListener {
 message TemplateAttr {
   uint32 name = 1;
   optional uint32 ns = 2;
-  string value = 3;
+  oneof value {
+    string text = 3;
+    bytes asset = 4;
+  }
 }
 
 // Children are indices into the enclosing RegisterTemplate.nodes.

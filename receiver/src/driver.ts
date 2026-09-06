@@ -1,6 +1,6 @@
 // The DOM-side driver: everything a `polymorph:stream-dom` receiver needs
 // that does NOT require a wasm component instance — backend selection,
-// policy compilation, frame decoding, dispatch-gate bracketing of byte
+// the policy seam, frame decoding, dispatch-gate bracketing of byte
 // application, event listener delegation/attach/detach, synthetic
 // navigation, event payload encoding, and the policy-gated `queries`
 // implementations. `mount.ts` is a thin component-glue layer over this:
@@ -18,8 +18,8 @@ import { encodePayload } from "./events.ts";
 import { FrameDecoder } from "./frames.ts";
 import type { Listener, ListenerTarget } from "./frames.ts";
 import { NativeDomReceiver } from "./native.ts";
-import { compilePolicy, queryAllowed } from "./policy.ts";
-import type { CompiledPolicy, Policy } from "./policy.ts";
+import { assertPolicyVersion, PolicySink } from "./policy.ts";
+import type { Policy } from "./policy.ts";
 import { createRemoteReceiver } from "./remote.ts";
 import type { Receiver } from "./receiver.ts";
 
@@ -84,15 +84,22 @@ export interface DriverOptions {
    * receiver — kept for comparison and for hosts that already speak
    * remote-dom). */
   receiver?: "native" | "remote";
-  /** Policy: the surface this embedder accepts, declared by proto name
-   * (policy.ts). THIS is the mechanism labelled fail-safe — undeclared
-   * mutation-stream surface is rejected, undeclared event payload fields
-   * are not encoded, undeclared `queries` refuse. Compiling the policy
-   * validates every name; a policy naming something unknown makes
-   * `createDriver` throw. */
+  /** Host vocabulary policy (policy.ts): it sees each vocabulary-bearing
+   * op with interned strings resolved and may reject it. Present also
+   * means STRICT decoding — wire content this receiver does not know is
+   * rejected instead of skipped, so the protocol growing cannot widen
+   * what a policy never reviewed. `createDriver` throws synchronously if
+   * the policy pins a different `PROTOCOL_VERSION`. */
   policy?: Policy;
+  /** Asset handle -> URL, for `SetAttribute`/`TemplateAttr` asset values
+   * (proto: the producer never names a URL itself). Required if the stream
+   * ever carries one; absent + an asset value is an error on the normal
+   * abort path. */
+  resolveAsset?(handle: Uint8Array): string;
   /** Asynchronous failure after mount: a dispatch-gate error (a
-   * `handleEvent` call rejecting or throwing synchronously). */
+   * `handleEvent` call rejecting or throwing synchronously). Policy
+   * rejections and strict-decode errors surface synchronously out of
+   * `push` instead — see `Driver.push`. */
   onError?(err: unknown): void;
   /** Deliver one event to the producer. `target`/`nameRef`/`payload` are
    * exactly what `handle-event` takes; `ev` is the live native Event, lent
@@ -109,8 +116,9 @@ export interface DriverOptions {
 
 export interface Driver {
   /** Apply stream bytes: gate-bracketed decode; counts stats. Throws on
-   * protocol/policy violation — the caller must then stop feeding and
-   * dispose. A no-op after `dispose()`. */
+   * protocol violation, on a strict-decode rejection, and on a
+   * `PolicyError` — the caller must then stop feeding and dispose. A
+   * no-op after `dispose()`. */
   push(bytes: Uint8Array): void;
   /** WIT `queries` implementations, policy-gated. */
   readonly queries: {
@@ -130,22 +138,22 @@ export interface Driver {
 
 /**
  * Build a `Driver` over `opts.root`: the requested `Receiver` backend, the
- * compiled policy, and delegated event dispatch — with no dependency on a
- * wasm component instance.
+ * policy seam, and delegated event dispatch — with no dependency on a wasm
+ * component instance.
  */
 export function createDriver(opts: DriverOptions): Driver {
+  // Before anything else: a policy written against another protocol
+  // version has not reviewed what this receiver would now accept.
+  const policy = opts.policy;
+  if (policy) assertPolicyVersion(policy);
+
   let disposed = false;
   const onError = opts.onError ?? (() => {});
   const gate = new DispatchGate(onError);
-  // Construction errors (a name this build does not know) propagate out of
-  // `createDriver` — see policy.ts `compilePolicy`.
-  const policy: CompiledPolicy | undefined = opts.policy
-    ? compilePolicy(opts.policy)
-    : undefined;
 
   const receiver: Receiver = opts.receiver === "remote"
-    ? createRemoteReceiver(opts.root)
-    : new NativeDomReceiver(opts.root);
+    ? createRemoteReceiver(opts.root, opts.resolveAsset)
+    : new NativeDomReceiver(opts.root, opts.resolveAsset);
 
   const stats = { batches: 0, frames: 0, bytes: 0 };
   let commitWaiters: Array<() => void> = [];
@@ -170,7 +178,7 @@ export function createDriver(opts: DriverOptions): Driver {
   // guest) unwinds. The read queries fire nothing and need no bracket.
 
   function getClientRect(target: number): Rect | undefined {
-    if (!queryAllowed(policy, "get-client-rect")) return undefined;
+    if (policy?.query && !policy.query("get-client-rect")) return undefined;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || typeof node.getBoundingClientRect !== "function") {
       return undefined;
@@ -183,7 +191,7 @@ export function createDriver(opts: DriverOptions): Driver {
   }
 
   function getScrollOffset(target: number): Point | undefined {
-    if (!queryAllowed(policy, "get-scroll-offset")) return undefined;
+    if (policy?.query && !policy.query("get-scroll-offset")) return undefined;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || !isNum(node.scrollLeft) || !isNum(node.scrollTop)) {
       return undefined;
@@ -192,7 +200,7 @@ export function createDriver(opts: DriverOptions): Driver {
   }
 
   function getScrollSize(target: number): Size | undefined {
-    if (!queryAllowed(policy, "get-scroll-size")) return undefined;
+    if (policy?.query && !policy.query("get-scroll-size")) return undefined;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     if (!node || !isNum(node.scrollWidth) || !isNum(node.scrollHeight)) {
       return undefined;
@@ -201,7 +209,7 @@ export function createDriver(opts: DriverOptions): Driver {
   }
 
   function setFocus(target: number, focus: boolean): boolean {
-    if (!queryAllowed(policy, "set-focus")) return false;
+    if (policy?.query && !policy.query("set-focus")) return false;
     const node = receiver.resolveNode(target) as ElementLike | undefined;
     const fn = focus ? node?.focus : node?.blur;
     if (typeof fn !== "function") return false;
@@ -235,7 +243,7 @@ export function createDriver(opts: DriverOptions): Driver {
     if (listener.preventDefault) ev.preventDefault();
     if (listener.stopPropagation) ev.stopPropagation();
     if (disposed) return;
-    const payload = encodePayload(name, ev, policy?.events);
+    const payload = encodePayload(name, ev);
     gate.dispatch(() => opts.handleEvent(target, nameRef, payload, ev));
   }
 
@@ -467,13 +475,13 @@ export function createDriver(opts: DriverOptions): Driver {
 
   // -- bytes in ---------------------------------------------------------------
 
-  // `Policy.sink` wraps the receiver's sink: ops reach it only if the
-  // wrapper forwards them, and only after `accept` has already rejected
-  // anything undeclared.
-  const sink = opts.policy?.sink
-    ? opts.policy.sink(receiver.sink)
-    : receiver.sink;
-  const decoder = new FrameDecoder(sink, { accept: policy?.accept });
+  // With a policy: ops reach the backend only if `PolicySink` forwards
+  // them, and the decoder rejects unknown wire content rather than
+  // skipping it (a wrapper alone would fail OPEN as the protocol grows —
+  // docs/design.md "Policy").
+  const decoder = policy
+    ? new FrameDecoder(new PolicySink(receiver.sink, policy), { strict: true })
+    : new FrameDecoder(receiver.sink);
 
   function push(bytes: Uint8Array): void {
     if (disposed) return; // no-op after dispose — see `Driver.push`'s doc.

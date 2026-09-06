@@ -48,17 +48,17 @@ export interface MountOptions {
    * uniform across transports rather than aliasing-safe in one and not
    * the other. */
   onChunk?(bytes: Uint8Array): void;
-  /** Policy: the surface this embedder accepts, declared by proto name
-   * (policy.ts). THIS is the mechanism labelled fail-safe — undeclared
-   * mutation-stream surface is rejected, undeclared event payload fields
-   * are not encoded, undeclared `queries` refuse. A bare `FrameSink`
-   * wrapper (`Policy.sink`) or a byte-level transformer in front of the
-   * decoder is also possible and useful for semantic checks, but is NOT
-   * fail-safe: both pass surface they have never seen straight through.
-   *
-   * Compiling the policy validates every name; a policy naming something
-   * unknown makes `mount` reject. */
+  /** Host vocabulary policy (policy.ts). Present => strict decoding plus
+   * a `PolicySink` in front of the backend: the policy sees each
+   * vocabulary-bearing op with interned strings resolved and may reject
+   * it, and wire content this receiver does not know is rejected rather
+   * than skipped. `mount` rejects synchronously if the policy pins a
+   * different `PROTOCOL_VERSION`. */
   policy?: Policy;
+  /** Asset handle -> URL. Required if the stream ever carries an asset
+   * attribute value; absent + an asset value is an error through the
+   * normal error path. */
+  resolveAsset?(handle: Uint8Array): string;
 }
 
 export interface Mounted {
@@ -118,6 +118,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     root: opts.root,
     receiver: opts.receiver,
     policy: opts.policy,
+    resolveAsset: opts.resolveAsset,
     onError,
     handleEvent: (target, nameRef, payload, ev) => {
       if (!exports_.handleEvent || disposed) return;

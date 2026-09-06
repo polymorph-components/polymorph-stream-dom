@@ -65,7 +65,7 @@ Deno.test("attribute update on an attached node", () => {
   t.commit();
   conn.batches.length = 0;
 
-  t.setAttribute(10, 2, undefined, "greeting");
+  t.setAttribute(10, 2, undefined, { kind: "text", value: "greeting" });
   t.commit();
 
   assertEquals(conn.batches.length, 1);
@@ -392,6 +392,38 @@ Deno.test("remove detaches and forgets the subtree", () => {
   assertThrows(() => t.setText(11, "x"));
 });
 
+Deno.test("template strings are resolved at registration, not at clone time", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "div");
+  t.internString(2, "title");
+  t.registerTemplate(100, [{
+    kind: "element",
+    element: {
+      tag: 1,
+      ns: undefined,
+      attrs: [{ name: 2, ns: undefined, value: { kind: "text", value: "hi" } }],
+      children: [],
+    },
+  }], [0]);
+  // The producer overwrites both slots (proto `Intern`: "Define (or
+  // overwrite) interned slot") before stamping the template out. The clone
+  // must still be the element that was registered, with the attribute name
+  // that was registered — that pair is what a policy approved.
+  t.internString(1, "section");
+  t.internString(2, "onclick");
+  t.cloneTemplate(100, 0, 20);
+  t.insertBefore(0, 20, undefined);
+  t.commit();
+
+  const [record] = conn.batches[0];
+  const child = record[2] as unknown as {
+    element: string;
+    attributes: Record<string, string>;
+  };
+  assertEquals(child.element, "div");
+  assertEquals(child.attributes, { title: "hi" });
+});
+
 Deno.test("register-template, clone, bind-path, then set-text on the bound interior node", () => {
   const { t, conn } = transcoder();
   t.internString(1, "div");
@@ -477,6 +509,10 @@ Deno.test("clone-template's root is an ordinal into RegisterTemplate.roots, not 
 
 Deno.test("clone-template throws when the root ordinal is out of range", () => {
   const { t } = transcoder();
+  // Interned because this backend now resolves template strings at
+  // REGISTRATION (as the native one always has) — an un-interned tag ref
+  // would abort there, before this test reaches its subject.
+  t.internString(0, "div");
   const nodes: TemplateNode[] = [
     {
       kind: "element",

@@ -177,10 +177,10 @@ processing may start before production finishes.
 `proto/stream-dom.proto` (proto3) is normative for every byte on the
 stream and in event payloads. The stream is the standard length-delimited form — varint byte
 length, then one `Frame`, repeated. No header; the package version is
-digest-checked at instantiation, and additive schema change (new `oneof`
-cases, new fields) needs no version bump because receivers skip what they
-do not know — except a receiver under a declared policy, which rejects
-what its embedder has not named ("Policy" below).
+digest-checked at instantiation. Additive schema change (a new `oneof`
+case, field or enum value) bumps the `PROTOCOL VERSION` number in the
+proto's header, and an *open* receiver skips what it does not know — a
+receiver enforcing a policy does not ("Policy" below).
 
 Chosen over a hand-rolled positional layout, which was the previous
 draft, for four things it could not offer cheaply:
@@ -481,6 +481,38 @@ text, Vue/Svelte `<!--[-->`…`<!--]-->`, Solid `data-hk`, Dioxus
 The marker syntax is an agreement between the SSR renderer and the
 receiver, not part of the op stream; the op carries only the key.
 
+### Assets are handles, not bytes and not URLs
+
+`SetAttribute.value` and `TemplateAttr.value` are a `oneof` of `text` and
+`asset`: an opaque byte handle (a content hash by convention) that the
+receiver materializes into a URL through a host-supplied `resolveAsset`
+hook. The protocol does not carry asset bytes and does not interpret the
+handle.
+
+Not bytes, because assets and mutations have opposite shapes. The stream is
+small, ordered, latency-sensitive and rendezvous-paced; a multi-megabyte
+image on it is head-of-line blocking for every frame behind it, and with
+unbuffered writes the producer stalls too. Blobs are bulk, cacheable,
+content-addressable, and need kind-specific handling (image re-encode,
+CSS parse/serialize, font sanitizing) whose cost scales with size. How
+bytes reach the receiver — bundled with the app, fetched by hash, published
+at runtime through a separate import — is the host's business; a
+recording of the stream plus the asset set it references is the complete
+artifact.
+
+Not only URLs, because a host that forbids producer-chosen URLs (see
+Policy) needs a value the producer *cannot* turn into one. A typed arm is
+that value: the schema documents the rule, a policy's "URL-kind attributes
+take `asset` only" is a structural check rather than a regex over a
+string, and headless receivers and recorders see a typed ref without
+knowing any grammar. Text URLs remain legal protocol — most producers and
+hosts want them, and whether they are allowed is a policy decision, not a
+wire rule.
+
+`asset` values in templates resolve once at `register-template`, not per
+clone. A receiver with no `resolveAsset` configured treats an asset value
+as an error.
+
 ## Events
 
 Dispatch: `handle-event(target, name, payload: list<u8>, ev)` export.
@@ -705,67 +737,64 @@ allowlist, no `sanitize` transformer and no default vocabulary
 an element registry into the host). What it ships is the seam a policy
 plugs into and one property the seam can guarantee.
 
-**The seam.** The decoder calls a `FrameSink`, one method per op, with
-`intern` and template trees included; a policy is a sink that wraps the
-receiver's and forwards what it allows. A throwing sink aborts the stream:
-no later op is applied, the mount's `onError` fires, the read end is
-dropped and the producer sees a dead channel on its next write.
-Partial-batch DOM state at that point is the embedder's to tear down, and
-for an untrusted producer teardown is the right answer — a conforming
-producer never emits a violating op, so a violation is a bug or hostile
-either way, and silently dropping it would hide exactly the signal the
-embedder wants. A recording of the stream (`onChunk`) reproduces any
-rejection offline.
+**The seam.** `MountOptions.policy` (and `createDriver`'s) is a
+`check(op)` callback. The receiver wraps its `FrameSink` in a
+`PolicySink` that shows the callback each vocabulary-bearing op —
+`createElement`, `setAttribute`, `setProperty`, `addListener`,
+`bindMarker` — with interned strings resolved and, for attribute and
+property ops, the element's tag, tracked through `clone-template` and
+`bind-path`. Templates are checked once at `register-template`, flattened
+into the same `createElement` / `setAttribute` shapes, so cloning and
+binding check nothing; and every template string (tag, attribute name,
+value) is pinned at registration in both the policy and the backends, so a
+later `intern` overwrite cannot make the applied DOM diverge from what the
+policy approved. A returned reason rejects: the op is not applied, the
+stream is closed (the producer sees a dead channel on its next write),
+and a `PolicyError` naming the op, its index and the reason reaches
+`onError`. There is no drop-and-continue. A conforming producer never
+emits a violating op, so a violation is a bug or hostile either way, and
+silently dropping it would hide exactly the signal the embedder wants. A
+recording of the stream (`onChunk`) reproduces any rejection offline.
+Which `queries` a producer may call is the same policy's optional
+`query(name)`; a refusal answers `none` / `false`, never throws, because
+the WIT signatures already carry "no answer".
 
-**Fail-safe by declaration.** A wrapper alone fails *open* when the
-protocol grows. The decoder skips unknown fields, as protobuf receivers
-do, and hands records to the wrapper whole: a new op, a new field on an
-existing message (`Listener.once`), or a new enum value reaches the
-wrapped receiver without the policy ever having a case for it. Type
-checking does not close this — an added optional field is
-type-compatible, JS consumers have no types, and a "bump the version
-constant" ritual gets performed without the review it was meant to force.
-So the receiver offers a second mechanism, the only one this document
-labels fail-safe: the embedder **declares by string every piece of
-protocol surface it accepts**, in the .proto's own names
-(`SetAttribute.value`, `Listener.prevent_default`, `Global.WINDOW`), and
-the decoder enforces the declaration before any value is consumed. Three
-directions, two behaviours:
+**Fail-safe against protocol growth: strict decoding and a version pin.**
+A wrapper alone fails *open* when the protocol grows. The decoder skips
+unknown fields, as protobuf receivers do: a new op, a new field on an
+existing message (`Listener.once`), or a new enum value would reach the
+receiver without the policy ever having a case for it. So with a policy
+present the decoder runs *strict* — an unknown op, field or enum value is
+an error, not a skip — which closes both the newer-producer case and the
+adversarial one. That leaves the case where the receiver library itself is
+upgraded and now knows vocabulary the policy has never seen. The policy
+carries the `PROTOCOL VERSION` it was written against, and `createDriver`
+refuses any other. This is a forced acknowledgment, not a compatibility
+promise: bumping the pin is the embedder saying "I have read what
+changed", and the mechanism only guarantees the upgrade cannot widen
+exposure silently. Do not automate the bump.
 
-- Mutation stream (producer → receiver): an undeclared or unknown
-  field, op or enum value is a `PolicyError` and aborts the stream.
-  Unknown tags are *rejected*, not skipped — the protobuf convention is
-  right for cooperating peers and wrong for an adversarial one, and it
-  also closes the case of a producer newer than the receiver.
-- Event payloads (receiver → producer): an undeclared field is not
-  encoded. The receiver authors payloads, so there is no violator; the
-  producer merely learns less. A payload family not declared is the
-  empty payload. (Which event *names* a producer may subscribe to is
-  vocabulary, checked by the sink like any other value.)
-- `queries` (producer asks receiver): an undeclared query answers
-  `none` / `false`. WIT-level growth — a new import, a new `dom-event`
-  method — already fails closed by construction, since the embedder
-  supplies the imports.
-
-The declared lists are data: reviewable in a diff, and the same list
-serves a host in one realm and a re-validating applier in another.
-`SURFACE_V1` is a frozen snapshot of today's full surface, so
-`{ ...SURFACE_V1, sink }` is the one-line policy; it never grows, and an
-embedder that updates this dependency keeps exactly the exposure it
-reviewed until it names the new fields itself. Unknown or removed names
-fail at construction, not at first frame. This is not a compatibility
-promise — an embedder updates its policy when it updates the receiver —
-only a guarantee that the update cannot widen exposure silently.
+The alternative considered was a per-field declaration — the embedder
+names every accepted proto field, with a frozen snapshot of today's
+surface as the one-line policy. It is strictly finer-grained (a
+mid-version producer using no new field would pass) and it was
+implemented and then removed: the whole-protocol pin gives the same
+guarantee against silent widening for one integer instead of a
+hundred-name list in two languages, and the finer grain buys nothing
+until protocol versions are released faster than embedders review them.
 
 **What this imposes on the protocol.** The mechanism catches *new*
 surface; it cannot catch an existing field acquiring meaning it did not
 have. Hence the evolution rule: new meaning is a new field, existing
 fields never change semantics, tags are never reused (protobuf already
-requires the last). Implementation: `receiver/src/policy.ts`.
+requires the last), and every addition bumps `PROTOCOL VERSION`.
+Implementation: `receiver/src/policy.ts`; the version constant is mirrored
+into Rust by `stream-dom-proto`'s build script and into the receiver by a
+test that re-reads the .proto.
 
 **What the receiver guarantees underneath a policy.** A policy is only
 as good as the receiver behind it, so the native receiver fails closed on
-malformed streams independently of any declaration: an id that does not
+malformed streams independently of any policy: an id that does not
 resolve, a re-registered live id, a node given two ids, a structural op
 on the mount root (create, move, remove, or the root as an insert anchor
 — the one way to put a producer node beside the mount rather than inside
@@ -1129,9 +1158,10 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
     third-party (a plugin), the receiver needs an allowlist — which is a
     transformer, and remote-dom's reason for existing. *Resolved, see
     "Policy":* the allowlist is the embedder's, not the protocol's; the
-    receiver ships the seam and a fail-safe declaration mechanism, no
-    `sanitize` transformer, and the native receiver fails closed on
-    malformed streams underneath it.
+    receiver ships the seam (a per-op callback with strings resolved),
+    strict decoding and a protocol-version pin, no `sanitize` transformer,
+    and the native receiver fails closed on malformed streams underneath
+    it. Still open: budgets (node, byte and event-rate ceilings).
 11. **View-transition batches.** A receiver must call
     `document.startViewTransition` before the first mutation of a batch
     that should animate, so the producer has to say so at the batch start.

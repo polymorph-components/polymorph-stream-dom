@@ -493,7 +493,10 @@ fn attribute_property_table_matches_dioxus_web() {
             )),
             Some(proto::frame::Op::SetAttribute(a)) => attrs.push((
                 interner.borrow().resolve(a.name).unwrap().to_string(),
-                a.value,
+                match a.value {
+                    Some(proto::set_attribute::Value::Text(s)) => Some(s),
+                    _ => None,
+                },
             )),
             _ => {}
         }
@@ -583,7 +586,7 @@ fn removing_a_node_forgets_its_descendants() {
     for f in decode_all(&bytes) {
         if let Some(proto::frame::Op::SetAttribute(a)) = f.op {
             if interner.borrow().resolve(a.name) == Some("class") {
-                if let Some(v) = a.value {
+                if let Some(proto::set_attribute::Value::Text(v)) = a.value {
                     buttons.push((v, a.id));
                 }
             }

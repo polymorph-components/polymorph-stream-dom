@@ -17,6 +17,13 @@ use stream_dom_fakedom::dom;
 use stream_dom_fakedom::event::{self, Target, Verdict};
 use stream_dom_guest::proto::{self, frame::Op};
 
+fn text_value(a: &proto::SetAttribute) -> Option<&str> {
+    match &a.value {
+        Some(proto::set_attribute::Value::Text(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 fn decode(bytes: &[u8]) -> Vec<proto::Frame> {
     let mut buf = bytes;
     let mut frames = Vec::new();
@@ -48,7 +55,7 @@ fn element_with_id(
 ) -> Option<u32> {
     let slot = *interns.get("id")?;
     frames.iter().find_map(|f| match &f.op {
-        Some(Op::SetAttribute(a)) if a.name == slot && a.value.as_deref() == Some(id) => Some(a.id),
+        Some(Op::SetAttribute(a)) if a.name == slot && text_value(a) == Some(id) => Some(a.id),
         _ => None,
     })
 }
@@ -190,7 +197,7 @@ fn create_1k_emits_a_thousand_rows_with_the_shared_label_sequence() {
         !frames.iter().any(|f| matches!(&f.op,
             Some(Op::SetAttribute(a))
                 if a.name == class
-                    && a.value.as_deref().is_some_and(|v| v.split(' ').any(|t| t == "selected"))
+                    && text_value(a).is_some_and(|v| v.split(' ').any(|t| t == "selected"))
         )),
         "no row should be selected after create-1k"
     );

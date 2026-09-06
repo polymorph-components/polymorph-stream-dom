@@ -13,6 +13,13 @@ use prost::Message;
 use stream_dom_fakedom::dom;
 use stream_dom_guest::proto::{self, frame::Op};
 
+fn text_value(a: &proto::SetAttribute) -> Option<&str> {
+    match &a.value {
+        Some(proto::set_attribute::Value::Text(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 fn mount_and_take_frames() -> Vec<proto::Frame> {
     // `web_sys::window()` reads `globalThis`, which the fake DOM installs
     // when its singleton is created; the driver does this in `run`.
@@ -52,7 +59,7 @@ fn todomvc_mounts_and_emits_its_markup() {
     let classes: Vec<&str> = frames
         .iter()
         .filter_map(|f| match &f.op {
-            Some(Op::SetAttribute(a)) if a.name == class_slot => a.value.as_deref(),
+            Some(Op::SetAttribute(a)) if a.name == class_slot => text_value(a),
             _ => None,
         })
         .collect();
@@ -212,9 +219,7 @@ fn element_with_class(
 ) -> Option<u32> {
     let slot = *interns.get("class")?;
     frames.iter().find_map(|f| match &f.op {
-        Some(Op::SetAttribute(a)) if a.name == slot => a
-            .value
-            .as_deref()
+        Some(Op::SetAttribute(a)) if a.name == slot => text_value(a)
             .filter(|v| v.split(' ').any(|t| t == class))
             .map(|_| a.id),
         _ => None,
@@ -325,7 +330,7 @@ fn a_hashchange_on_window_moves_the_selected_filter() {
             Some(Op::SetAttribute(a))
                 if a.id == all_link
                     && a.name == class_slot
-                    && !a.value.as_deref().unwrap_or("").split(' ').any(|t| t == "selected")
+                    && !text_value(a).unwrap_or("").split(' ').any(|t| t == "selected")
         )),
         "`All` should have had `selected` removed"
     );
@@ -337,9 +342,7 @@ fn selected_ids(frames: &[proto::Frame], class_slot: u32) -> Vec<u32> {
     for f in frames {
         if let Some(Op::SetAttribute(a)) = &f.op {
             if a.name == class_slot {
-                let on = a
-                    .value
-                    .as_deref()
+                let on = text_value(a)
                     .unwrap_or("")
                     .split(' ')
                     .any(|t| t == "selected");

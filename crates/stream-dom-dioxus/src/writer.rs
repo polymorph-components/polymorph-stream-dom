@@ -382,7 +382,7 @@ impl MutationWriter {
                         out_attrs.push(proto::TemplateAttr {
                             name,
                             ns,
-                            value: (*value).to_string(),
+                            value: Some(proto::template_attr::Value::Text((*value).to_string())),
                         });
                     }
                 }
