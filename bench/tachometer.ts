@@ -52,6 +52,11 @@ export interface GenerateOptions {
   sampleSize?: number;
   /** `browser.binary` passthrough — a local Chrome/Chromium binary path. */
   chromeBinary?: string;
+  /** Include the `chunked` transport. Off by default: it is a diagnostic
+   * knob, not a shipped path, and it doubles a run that is dominated by
+   * per-sample page loads (the full 72-variant matrix at 25 samples took
+   * 45 minutes on a GitHub runner). */
+  full?: boolean;
 }
 
 export function generateConfig(opts: GenerateOptions): TachometerConfig {
@@ -59,6 +64,7 @@ export function generateConfig(opts: GenerateOptions): TachometerConfig {
   for (const producer of PRODUCERS) {
     for (const receiver of RECEIVERS) {
       for (const transport of TRANSPORTS) {
+        if (transport === "chunked" && !opts.full) continue;
         for (const op of OPS) {
           const name = `${producer}/${receiver}/${transport}/${op}`;
           if (opts.filter && !name.includes(opts.filter)) continue;
