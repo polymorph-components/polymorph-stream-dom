@@ -8,13 +8,26 @@ default: check test
 check:
     cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
     cargo clippy --manifest-path guests/web-sys/Cargo.toml --workspace --target wasm32-wasip2 -- -D warnings
+    cargo clippy --manifest-path host/Cargo.toml --workspace -- -D warnings
     deno task check
 
-# Native unit tests (encoder, transcoder fixtures) + receiver tests.
-test:
+# Native unit tests (encoder, transcoder fixtures) + receiver tests + the
+# wasmtime host, whose integration test runs the TodoMVC component.
+test: host-component
     cargo test --workspace --exclude dioxus-todomvc
     cargo test --manifest-path guests/web-sys/Cargo.toml --workspace
+    cargo test --manifest-path host/Cargo.toml --workspace
     deno task test
+
+# The one component `just test` needs. Same build as the `component` recipe
+# without the translation step, which needs deno and the network.
+host-component:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p build
+    cargo build -p dioxus-todomvc --target wasm32-wasip2 --release
+    cp target/wasm32-wasip2/release/dioxus_todomvc.wasm build/dioxus-todomvc.component.wasm
+    wasm-tools validate --features component-model,cm-async build/dioxus-todomvc.component.wasm
 
 # Build all demo + bench components into build/ and translate them at
 # build time (the demos ship no translator).
@@ -54,3 +67,29 @@ bench-wire: site
 bench: site
     npx -y playwright@1.58 install chromium
     deno run -A bench/run.ts
+
+# Bundle the desktop app's frontend (host/desktop/dist/).
+desktop-ui:
+    deno run -A host/desktop/build.ts
+
+# Build the Tauri desktop app: the TodoMVC component it embeds, its
+# frontend bundle, then the Rust binary. `resource_dir()` in an unbundled
+# dev/CI build resolves to the binary's own directory (tauri-utils
+# `platform::resource_dir`'s "cargo output directory" case), so the
+# component the binary loads via `BaseDirectory::Resource` has to be
+# copied there by hand rather than relying on `tauri.conf.json`'s
+# `bundle.resources` (that only fires for `cargo tauri build`, which this
+# recipe deliberately does not invoke — the dispatch names a plain
+# `cargo build --release`).
+desktop: host-component desktop-ui
+    cargo build --manifest-path host/Cargo.toml -p stream-dom-desktop --release
+    mkdir -p host/target/release/components
+    cp build/dioxus-todomvc.component.wasm host/target/release/components/
+
+# WebDriver smoke test against the built app (host/desktop/e2e/smoke.ts).
+# No display on this machine: everything GUI runs under `xvfb-run -a`.
+# Named explicitly, not `host/desktop/e2e/`: `deno test` only autodiscovers
+# `*_test.ts`/`*.test.ts`, and `smoke.ts` (not `smoke_test.ts`) is the name
+# this track's dispatch specified.
+desktop-smoke: desktop
+    xvfb-run -a deno test -A host/desktop/e2e/smoke.ts

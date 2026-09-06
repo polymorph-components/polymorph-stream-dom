@@ -362,6 +362,164 @@ Deno.test("Driver: an unknown node id throws", () => {
   withGlobalWindow(win, () => driver.dispose());
 });
 
+// -- 3b. defaultPreventDefault (docs/design.md "Events", option C; see
+// driver.ts's doc on `DriverOptions.defaultPreventDefault` for why this
+// is unconditional — no producer listener is registered in ANY of these
+// tests, on purpose: the whole point is that an unlistened `<form>`/
+// `<a href>` is the dangerous case). ---------------------------------------
+
+Deno.test("Driver: defaultPreventDefault prevents a submit with NO producer listener at all, when on; not when off", async () => {
+  for (const on of [true, false]) {
+    const { win, root } = fixture();
+    const driver = createDriver({
+      root,
+      defaultPreventDefault: on,
+      handleEvent: () => {},
+    });
+    await pushAndAwaitCommit(driver, concat(basicFrames()));
+
+    const div = root.querySelector("div")!;
+    const ev = new (win as unknown as { Event: typeof Event }).Event(
+      "submit",
+      { bubbles: true, cancelable: true },
+    );
+    // events.ts's form-data encoder does a bare `instanceof
+    // HTMLFormElement` (as it would against the real global in a page);
+    // linkedom's per-window class isn't the bare global, so patch it in
+    // for this dispatch alongside `withGlobalWindow`'s window/document.
+    const hadCtor = "HTMLFormElement" in globalThis;
+    const prevCtor = (globalThis as Record<string, unknown>).HTMLFormElement;
+    (globalThis as Record<string, unknown>).HTMLFormElement =
+      (win as unknown as { HTMLFormElement: unknown }).HTMLFormElement;
+    try {
+      withGlobalWindow(win, () => div.dispatchEvent(ev));
+    } finally {
+      if (hadCtor) {
+        (globalThis as Record<string, unknown>).HTMLFormElement = prevCtor;
+      } else delete (globalThis as Record<string, unknown>).HTMLFormElement;
+    }
+    assertEquals(ev.defaultPrevented, on);
+
+    withGlobalWindow(win, () => driver.dispose());
+  }
+});
+
+/** Build a driver over a fresh `<tag href=...?>` under `root` (node id
+ * 10, no producer listener registered), with `defaultPreventDefault` on. */
+async function fixtureWithLeaf(
+  tag: string,
+  href?: string,
+): Promise<
+  { win: unknown; root: Element; driver: ReturnType<typeof createDriver> }
+> {
+  const { win, root } = fixture();
+  const driver = createDriver({
+    root,
+    defaultPreventDefault: true,
+    handleEvent: () => {},
+  });
+  await pushAndAwaitCommit(
+    driver,
+    concat([
+      frame(false, (w) => {
+        w.writeMessage(FRAME_INTERN, (m) => {
+          m.writeUint32(INTERN_ID, DIV);
+          m.writeString(INTERN_S, tag);
+        });
+      }),
+      frame(false, (w) => {
+        w.writeMessage(FRAME_CREATE_ELEMENT, (m) => {
+          m.writeUint32(CREATE_ELEMENT_ID, 10);
+          m.writeUint32(CREATE_ELEMENT_TAG, DIV);
+        });
+      }),
+      frame(true, (w) => {
+        w.writeMessage(FRAME_INSERT_BEFORE, (m) => {
+          m.writeUint32(INSERT_BEFORE_PARENT, 0);
+          m.writeUint32(INSERT_BEFORE_ID, 10);
+        });
+      }),
+    ]),
+  );
+  if (href !== undefined) {
+    root.querySelector(tag)!.setAttribute("href", href);
+  }
+  return { win, root, driver };
+}
+
+Deno.test("Driver: defaultPreventDefault prevents a click on <a href='http://x'> with NO producer listener", async () => {
+  const { win, root, driver } = await fixtureWithLeaf("a", "http://x");
+  const ev = new (win as unknown as { Event: typeof Event }).Event("click", {
+    bubbles: true,
+    cancelable: true,
+  });
+  root.querySelector("a")!.dispatchEvent(ev);
+  assertEquals(ev.defaultPrevented, true);
+  withGlobalWindow(win, () => driver.dispose());
+});
+
+Deno.test("Driver: defaultPreventDefault does NOT prevent a click on <a href='#/active'> (same-document fragment)", async () => {
+  const { win, root, driver } = await fixtureWithLeaf("a", "#/active");
+  const ev = new (win as unknown as { Event: typeof Event }).Event("click", {
+    bubbles: true,
+    cancelable: true,
+  });
+  root.querySelector("a")!.dispatchEvent(ev);
+  assertEquals(ev.defaultPrevented, false);
+  withGlobalWindow(win, () => driver.dispose());
+});
+
+Deno.test("Driver: defaultPreventDefault does not touch a click on <button>", async () => {
+  const { win, root, driver } = await fixtureWithLeaf("button");
+  const ev = new (win as unknown as { Event: typeof Event }).Event("click", {
+    bubbles: true,
+    cancelable: true,
+  });
+  root.querySelector("button")!.dispatchEvent(ev);
+  assertEquals(ev.defaultPrevented, false);
+  withGlobalWindow(win, () => driver.dispose());
+});
+
+Deno.test("Driver: defaultPreventDefault off means nothing is prevented, even a plain submit/click on <a href>", async () => {
+  const { win, root } = fixture();
+  const driver = createDriver({
+    root,
+    defaultPreventDefault: false,
+    handleEvent: () => {},
+  });
+  await pushAndAwaitCommit(
+    driver,
+    concat([
+      frame(false, (w) => {
+        w.writeMessage(FRAME_INTERN, (m) => {
+          m.writeUint32(INTERN_ID, DIV);
+          m.writeString(INTERN_S, "a");
+        });
+      }),
+      frame(false, (w) => {
+        w.writeMessage(FRAME_CREATE_ELEMENT, (m) => {
+          m.writeUint32(CREATE_ELEMENT_ID, 10);
+          m.writeUint32(CREATE_ELEMENT_TAG, DIV);
+        });
+      }),
+      frame(true, (w) => {
+        w.writeMessage(FRAME_INSERT_BEFORE, (m) => {
+          m.writeUint32(INSERT_BEFORE_PARENT, 0);
+          m.writeUint32(INSERT_BEFORE_ID, 10);
+        });
+      }),
+    ]),
+  );
+  root.querySelector("a")!.setAttribute("href", "http://x");
+  const ev = new (win as unknown as { Event: typeof Event }).Event("click", {
+    bubbles: true,
+    cancelable: true,
+  });
+  root.querySelector("a")!.dispatchEvent(ev);
+  assertEquals(ev.defaultPrevented, false);
+  withGlobalWindow(win, () => driver.dispose());
+});
+
 Deno.test("Driver: after dispose, root listeners are gone (dispatch no longer calls handleEvent)", async () => {
   const { win, root } = fixture();
   const calls: unknown[] = [];

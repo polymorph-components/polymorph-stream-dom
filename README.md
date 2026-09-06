@@ -37,7 +37,10 @@ latter is its own cargo workspace because it `[patch]`es `wasm-bindgen`
 with a fake whose `#[wasm_bindgen]` macro lets the real `web-sys` drive a
 Rust shadow DOM — Dominator's TodoMVC runs unmodified),
 `receiver/` (TypeScript receiver + polyengine host glue), `web/` (demo
-site and browser test). `just --list` for the build and test recipes.
+site and browser test), `host/` (a wasmtime host for producers and a Tauri
+desktop app that renders one through the same receiver in its webview —
+its own cargo workspace, since it is native). `just --list` for the build
+and test recipes.
 
 The immediate predecessor is
 [polyengine-dioxus](https://github.com/lannbot/polyengine-dioxus), a

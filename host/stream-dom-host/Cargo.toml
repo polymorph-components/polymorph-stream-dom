@@ -1,0 +1,31 @@
+[package]
+name = "stream-dom-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `component-model-async` pulls in `async` + `component-model`; `cranelift`
+# and `runtime` are the compile and execute halves. Everything else the
+# default feature set carries (gc, cache, profiling, coredump, wat, ...) is
+# unused here, hence `default-features = false`.
+wasmtime = { version = "47", default-features = false, features = [
+  "component-model-async",
+  # `Error::from_anyhow`: wasmtime 47 has its own `Error` type, and the
+  # public API of this crate speaks `anyhow`.
+  "anyhow",
+  "cranelift",
+  "runtime",
+  "std",
+] }
+# p2 WASI: the guest imports `wasi:{io,clocks,cli,random}@0.2.9`.
+wasmtime-wasi = "47"
+anyhow = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+log = "0.4"
+
+[dev-dependencies]
+stream-dom-proto = { path = "../../crates/stream-dom-proto" }
+prost = { version = "0.14", default-features = false, features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }

@@ -20,6 +20,8 @@ export { NativeDomReceiver } from "./native.ts";
 export { encodePayload } from "./events.ts";
 export { assertPolicyVersion, PolicyError, PolicySink } from "./policy.ts";
 export type { Policy, PolicyOp } from "./policy.ts";
+export { desktopPolicy } from "./policy-desktop.ts";
+export type { DesktopPolicyOptions } from "./policy-desktop.ts";
 export { DispatchGate } from "./dispatch.ts";
 export { mount } from "./mount.ts";
 export type { Mounted, MountOptions } from "./mount.ts";

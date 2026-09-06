@@ -705,13 +705,19 @@ Two gaps the shims cannot close:
 
 Design to the weakest transport; the others buy latency, not semantics.
 
-| | In-process (component) | Worker / iframe | Network |
-|---|---|---|---|
-| Guest blocking reads | yes | yes (host parks the guest across `postMessage`) | yes (slow) |
-| Non-`async` export honored inside a DOM listener | yes | no (proxy) | no |
-| Imperative `preventDefault` (option A) | yes | no | no |
-| Backpressure | rendezvous | rendezvous (host paces reads) | rendezvous (host paces reads by remote ack) |
-| Reconnect / resync | n/a | n/a | needs `reset` + full snapshot |
+| | In-process (component) | Worker / iframe | Native host ↔ webview | Network |
+|---|---|---|---|---|
+| Guest blocking reads | yes | yes (host parks the guest across `postMessage`) | yes (host parks the guest across IPC) | yes (slow) |
+| Non-`async` export honored inside a DOM listener | yes | no (proxy) | no | no |
+| Imperative `preventDefault` (option A) | yes | no | no | no |
+| Backpressure | rendezvous | rendezvous (host paces reads) | rendezvous (webview pulls; its next pull acks the last chunk) | rendezvous (host paces reads by remote ack) |
+| Reconnect / resync | n/a | n/a | n/a (a dead producer is torn down, not resumed) | needs `reset` + full snapshot |
+
+The native-host column is the worker tier with the producer in a wasmtime
+process instead of a worker: same semantics, and the wasm sandbox gains
+what a worker cannot offer — hard memory and CPU limits per producer and a
+capability surface (WASI imports) the host chooses. Built in `host/`; see
+"Spike".
 
 Because the stream is unbuffered, backpressure is uniform: the host decides
 when to issue the next read and the guest sees identical semantics
@@ -810,6 +816,58 @@ stack at registration. Gate: `receiver/tests/hostile_test.ts` — a
 structured op fuzzer and a byte-mutation fuzzer over the fixture stream,
 each asserting the mount root and its siblings are untouched after any
 rejection. The remote-dom backend is not hardened.
+
+**Trust inversion, and the first concrete policy.** In the browser spike
+producer and receiver are equally unprivileged. In a desktop host they are
+not: the webview holds IPC capabilities into the native process, so a
+DOM-level escape from the producer — a `<script>`, an `on*` attribute, a
+`javascript:` URL, a `<form>` submitting the page away, a `<form
+name=createElement>` clobbering `document.createElement` for the host's
+own code — is not a defaced widget but a jump from a wasm sandbox into the
+application. That embedding is the first with a real reason to write a
+policy, so the receiver now ships one: `desktopPolicy()`
+(`receiver/src/policy-desktop.ts`), deny-by-default in every direction the
+seam offers. Tags, attributes, properties and event names are allowlists,
+not denylists — the review of the first cut found three classes of
+attribute (`popovertarget`/`commandfor`, `formtarget`, `name` on
+`<form>`/`<img>`) that a denylist written by people who know the platform
+well had still missed, which is the argument for allowlists in one
+sentence. URL-kind attributes take `asset` values only (see "Assets are
+handles"), with two opt-ins: `relativeHref` for `#fragment` and
+same-origin `/path` text on `<a>`, judged by parsing against a placeholder
+origin rather than by prefix (the URL parser turns `/\evil` into an
+authority and strips tabs and newlines), and `externalLinks` for `http(s)`
+text on `<a>`, which is only safe because the host refuses to follow the
+navigation (`on_navigation` in the Tauri app) — the producer may *name* a
+link, the host decides whether to honour it. Budgets close open question
+10's remainder: `maxNodes` and `maxListeners` are cumulative per stream
+and `maxStringBytes` bounds each attribute or property string; removals
+are not credited back, and clones are not counted, because neither reaches
+the policy (below).
+
+The same embedding changed the receiver's default-action handling. Option
+C's "a registered `submit` listener implies preventDefault" is too narrow
+for a privileged host: the dangerous case is the `<form>` with *no*
+listener, which submits to the host page's own URL and tears the producer
+down, or the `<a href>` with no listener, which navigates the webview.
+`createDriver({ defaultPreventDefault: true })` therefore installs two
+capture listeners at the mount root that cancel every `submit` and every
+click on an `<a href>` whose target is not a same-document fragment,
+whether or not the producer listened. Hash routers keep working; nothing
+else leaves the page unless the host arranges it. The in-page polyengine
+mount leaves the flag off and keeps option A.
+
+**What a policy cannot see.** `PolicyOp` carries names and values, not
+structure or absence, so four things this threat model wants are outside
+any `check`: default navigation with no listener (handled by the driver
+flag above and the host's navigation hook, not by policy); live-node
+budgets (no `remove`, `clone-template` or `create-text` reaches the
+policy, so `maxNodes` over-counts churn and under-counts clones); host
+page name-space collisions (`id`, `class` and `<label for>` values are
+visible, the host's own ids are not — the embedder's discipline is to not
+rely on named global access in the document that hosts a mount); and text
+node lengths, bounded only by `MAX_FRAME_BYTES`. Each is recorded where
+the next embedder will look for it, in `desktopPolicy`'s doc comment.
 
 **Driving the receiver without a component.** `receiver/src/driver.ts`
 is the DOM side on its own — bytes in through `push`, events out through
@@ -1105,6 +1163,35 @@ call `prevent_default()` imperatively, so `prevent-default` /
 "Events" gets nothing from this producer, and a remote receiver would have
 to fall back to a per-event-type default policy.
 
+**A native host is the worker tier, and the invariant held for free.**
+`host/stream-dom-host` runs producers on wasmtime 47 (component-model
+async, epoch interruption, `StoreLimits`, a WASI context with no preopens
+and no sockets); `host/desktop` is a Tauri 2 app whose webview runs the
+same `receiver/` driver the browser demo uses, reached over IPC. The
+receiver pulls: one `read_chunk` command per guest write, returning the
+raw bytes, and the *next* `read_chunk` is the acknowledgement that the
+previous chunk was applied. On the wasmtime side that acknowledgement is
+what completes the guest's `stream.write` (`StreamConsumer::poll_consume`
+returns `Pending` with the bytes taken until the ack arrives), so a
+producer that writes, commits and then calls `get-client-rect` cannot
+observe the DOM before its batch landed — "queries observe every committed
+batch" is structural on this tier too, with no receiver-side buffering and
+no query ordering bookkeeping. The cost is one IPC round trip per batch,
+which the smoke test measured at ~60–100 ms on webkit2gtk under Xvfb
+against single-digit milliseconds for the DOM apply; the wire is the same
+bytes, so a buffered mode (complete writes into a bounded host buffer,
+order queries against a byte offset) is an optimisation for later, not a
+protocol change. Events go the other way as one `invoke` with the encoded
+payload as the raw body and target/name in headers; queries ride a Tauri
+`Channel` and are answered by a second command. Two things the embedding
+surfaced: WebDriver typing a whole string into the TodoMVC input dropped
+characters, because the input is producer-controlled and each keystroke
+round-trips before the value is confirmed — a real cost of a slow host
+between every keystroke and its echo, and an argument for the coalescer;
+and `Config::async_support` is a no-op in wasmtime 47 — `concurrency_support`
+is the knob that gates `run_concurrent`, `call_concurrent` and
+`StreamReader`.
+
 Not built: hydration (`run(hydrate = true)` traps), the coalescer, any
 worker or network tier, the conformance corpus (only a single encoder
 fixture cross-checked by the TS decoder), namespaces through remote-dom,
@@ -1117,8 +1204,10 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
    apply a whole batch without a rendering opportunity? Decides whether
    receivers ever need to buffer until `commit`. *Answered for polyengine
    in-process by the spike:* a `readDirect` consumer applies the batch
-   inside the rendezvous, before the write completes. Still open for the
-   chunked read path and for other embeddings.
+   inside the rendezvous, before the write completes. *Answered for the
+   native host:* the write completes only on the webview's acknowledgement,
+   so the whole batch is applied before the guest resumes. Still open for
+   the chunked read path in the browser.
 2. **Option A backpressure hazard.** How often is a producer instance under
    backpressure when a DOM event arrives, with a stackful scheduler? If
    "essentially never", A + C is settled.
@@ -1161,7 +1250,8 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
     receiver ships the seam (a per-op callback with strings resolved),
     strict decoding and a protocol-version pin, no `sanitize` transformer,
     and the native receiver fails closed on malformed streams underneath
-    it. Still open: budgets (node, byte and event-rate ceilings).
+    it. Budgets are in the first concrete policy ("Trust inversion");
+    an event-rate ceiling is not, since events are host-authored.
 11. **View-transition batches.** A receiver must call
     `document.startViewTransition` before the first mutation of a batch
     that should animate, so the producer has to say so at the batch start.
