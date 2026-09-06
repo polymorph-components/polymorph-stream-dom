@@ -89,7 +89,9 @@ fn todomvc_mounts_and_emits_its_markup() {
             Op::CreateText(c) => created.push(c.id),
             Op::CreatePlaceholder(c) => created.push(c.id),
             Op::InsertBefore(i) => {
-                assert!(created.contains(&i.parent) && created.contains(&i.id));
+                // The shim always states the parent, anchor or not.
+                let parent = i.parent.expect("the shim always names a parent");
+                assert!(created.contains(&parent) && created.contains(&i.id));
                 if let Some(a) = i.anchor {
                     assert!(created.contains(&a));
                 }
