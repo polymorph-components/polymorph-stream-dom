@@ -14,9 +14,15 @@ type Call =
   | { op: "createPlaceholder"; id: number }
   | {
     op: "insertBefore";
-    parent: number;
+    parent: number | undefined;
     id: number;
     anchor: number | undefined;
+  }
+  | {
+    op: "insertAfter";
+    parent: number | undefined;
+    id: number;
+    anchor: number;
   }
   | { op: "remove"; id: number }
   | { op: "setText"; id: number; text: string }
@@ -55,8 +61,15 @@ class RecordingSink implements FrameSink {
   createPlaceholder(id: number): void {
     this.calls.push({ op: "createPlaceholder", id });
   }
-  insertBefore(parent: number, id: number, anchor: number | undefined): void {
+  insertBefore(
+    parent: number | undefined,
+    id: number,
+    anchor: number | undefined,
+  ): void {
     this.calls.push({ op: "insertBefore", parent, id, anchor });
+  }
+  insertAfter(parent: number | undefined, id: number, anchor: number): void {
+    this.calls.push({ op: "insertAfter", parent, id, anchor });
   }
   remove(id: number): void {
     this.calls.push({ op: "remove", id });
@@ -100,7 +113,7 @@ class RecordingSink implements FrameSink {
 
 // crates/stream-dom-guest/fixtures/basic.pb + basic.txt: the cross-check
 // corpus from the Rust producer side (docs/design.md open question 7,
-// "Conformance corpus"). basic.txt's 11 `Frame { ... }` lines are the
+// "Conformance corpus"). basic.txt's 15 `Frame { ... }` lines are the
 // expected decode.
 const fixtureDir = new URL(
   "../../crates/stream-dom-guest/fixtures/",
@@ -111,14 +124,14 @@ async function loadFixture(): Promise<Uint8Array> {
   return await Deno.readFile(new URL("basic.pb", fixtureDir));
 }
 
-Deno.test("FrameDecoder decodes basic.pb into basic.txt's 11 frames", async () => {
+Deno.test("FrameDecoder decodes basic.pb into basic.txt's 15 frames", async () => {
   const bytes = await loadFixture();
   const sink = new RecordingSink();
   const decoder = new FrameDecoder(sink);
   decoder.push(bytes);
 
   const calls = sink.calls;
-  assertEquals(calls.length, 12); // 11 frames' ops, plus the trailing commit()
+  assertEquals(calls.length, 16); // 15 frames' ops, plus the trailing commit()
 
   assertEquals(calls[0], { op: "internString", id: 1, s: "div" });
   assertEquals(calls[1], { op: "internString", id: 2, s: "click" });
@@ -137,14 +150,32 @@ Deno.test("FrameDecoder decodes basic.pb into basic.txt's 11 frames", async () =
     id: 2,
     anchor: undefined,
   });
-  assertEquals(calls[7], {
+  assertEquals(calls[7], { op: "createText", id: 3, text: "!" });
+  // InsertAfter { parent: None, id: 3, anchor: 2 } — parent implied from
+  // anchor 2's current shadow parent (node 1).
+  assertEquals(calls[8], {
+    op: "insertAfter",
+    parent: undefined,
+    id: 3,
+    anchor: 2,
+  });
+  assertEquals(calls[9], { op: "createText", id: 4, text: "?" });
+  // InsertBefore { parent: None, id: 4, anchor: Some(3) } — parent implied
+  // from anchor 3's current shadow parent, likewise node 1.
+  assertEquals(calls[10], {
+    op: "insertBefore",
+    parent: undefined,
+    id: 4,
+    anchor: 3,
+  });
+  assertEquals(calls[11], {
     op: "setAttribute",
     id: 1,
     name: 3,
     ns: undefined,
     value: "greeting",
   });
-  assertEquals(calls[8], {
+  assertEquals(calls[12], {
     op: "addListener",
     listener: {
       id: 1,
@@ -156,11 +187,11 @@ Deno.test("FrameDecoder decodes basic.pb into basic.txt's 11 frames", async () =
       stopPropagation: false,
     },
   });
-  assertEquals(calls[9], { op: "setText", id: 2, text: "hello, world" });
-  // Frame 11: commit=true, op=Remove{id:2} — op applied before commit is
+  assertEquals(calls[13], { op: "setText", id: 2, text: "hello, world" });
+  // Frame 15: commit=true, op=Remove{id:2} — op applied before commit is
   // honored (docs/design.md "Batches are framed by a `commit` flag").
-  assertEquals(calls[10], { op: "remove", id: 2 });
-  assertEquals(calls[11], { op: "commit" });
+  assertEquals(calls[14], { op: "remove", id: 2 });
+  assertEquals(calls[15], { op: "commit" });
 });
 
 Deno.test("FrameDecoder handles a frame straddling arbitrary chunk boundaries (byte-by-byte)", async () => {
@@ -169,10 +200,16 @@ Deno.test("FrameDecoder handles a frame straddling arbitrary chunk boundaries (b
   const decoder = new FrameDecoder(sink);
   for (const byte of bytes) decoder.push(Uint8Array.of(byte));
 
-  assertEquals(sink.calls.length, 12); // 11 ops + the trailing commit
+  assertEquals(sink.calls.length, 16); // 15 ops + the trailing commit
   assertEquals(sink.calls[0], { op: "internString", id: 1, s: "div" });
-  assertEquals(sink.calls[10], { op: "remove", id: 2 });
-  assertEquals(sink.calls[11], { op: "commit" });
+  assertEquals(sink.calls[8], {
+    op: "insertAfter",
+    parent: undefined,
+    id: 3,
+    anchor: 2,
+  });
+  assertEquals(sink.calls[14], { op: "remove", id: 2 });
+  assertEquals(sink.calls[15], { op: "commit" });
 });
 
 Deno.test("FrameDecoder throws (does not silently wait forever) on a malformed length varint", () => {

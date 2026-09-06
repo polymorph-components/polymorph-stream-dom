@@ -24,7 +24,8 @@ const FRAME_ADD_LISTENER = 12;
 const FRAME_REMOVE_LISTENER = 13;
 const FRAME_INTERN = 14;
 const FRAME_REGISTER_TEMPLATE = 15;
-const FRAME_BIND_MARKER = 16;
+const FRAME_INSERT_AFTER = 16;
+const FRAME_BIND_MARKER = 17;
 /** Lowest oneof `op` field number — used to recognize "some op field was
  * present, even one this decoder does not know" for the no-op/no-commit
  * check below. */
@@ -45,6 +46,10 @@ const CREATE_PLACEHOLDER_ID = 1;
 const INSERT_BEFORE_PARENT = 1;
 const INSERT_BEFORE_ID = 2;
 const INSERT_BEFORE_ANCHOR = 3;
+
+const INSERT_AFTER_PARENT = 1;
+const INSERT_AFTER_ID = 2;
+const INSERT_AFTER_ANCHOR = 3;
 
 const REMOVE_ID = 1;
 
@@ -149,7 +154,19 @@ export interface FrameSink {
   createElement(id: number, tag: number, ns: number | undefined): void;
   createText(id: number, text: string): void;
   createPlaceholder(id: number): void;
-  insertBefore(parent: number, id: number, anchor: number | undefined): void;
+  /** `parent` is presence-tracked: `undefined` (NOT `0`, which is the mount
+   * root) means "no parent named — use `anchor`'s current shadow parent",
+   * legal only when `anchor` is present (proto: "`parent` is required
+   * without an `anchor` and optional with one"). */
+  insertBefore(
+    parent: number | undefined,
+    id: number,
+    anchor: number | undefined,
+  ): void;
+  /** Insert `id` immediately after `anchor`. `parent`, same presence rule
+   * as `insertBefore`'s; `anchor` itself is always present (proto:
+   * `InsertAfter.anchor` is a plain `uint32`, not `optional`). */
+  insertAfter(parent: number | undefined, id: number, anchor: number): void;
   remove(id: number): void;
   setText(id: number, text: string): void;
   setAttribute(
@@ -418,7 +435,7 @@ export class FrameDecoder {
         }
         case FRAME_INSERT_BEFORE: {
           const sub = r.readMessage();
-          let parent = 0, id = 0, anchor: number | undefined;
+          let parent: number | undefined, id = 0, anchor: number | undefined;
           while (!sub.finished()) {
             const [f, wt] = sub.readTag();
             if (f === INSERT_BEFORE_PARENT) parent = sub.readVarint32();
@@ -427,6 +444,19 @@ export class FrameDecoder {
             else sub.skip(wt);
           }
           dispatch = () => this.#sink.insertBefore(parent, id, anchor);
+          break;
+        }
+        case FRAME_INSERT_AFTER: {
+          const sub = r.readMessage();
+          let parent: number | undefined, id = 0, anchor = 0;
+          while (!sub.finished()) {
+            const [f, wt] = sub.readTag();
+            if (f === INSERT_AFTER_PARENT) parent = sub.readVarint32();
+            else if (f === INSERT_AFTER_ID) id = sub.readVarint32();
+            else if (f === INSERT_AFTER_ANCHOR) anchor = sub.readVarint32();
+            else sub.skip(wt);
+          }
+          dispatch = () => this.#sink.insertAfter(parent, id, anchor);
           break;
         }
         case FRAME_REMOVE: {

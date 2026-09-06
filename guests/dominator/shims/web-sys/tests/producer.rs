@@ -82,7 +82,14 @@ fn assert_define_before_use(frames: &[proto::Frame]) {
             Op::CreateText(c) => nodes.push(c.id),
             Op::CreatePlaceholder(c) => nodes.push(c.id),
             Op::InsertBefore(i) => {
-                used_node(&nodes, i.parent, "insert-before parent");
+                // The shim always knows the parent (the shadow tree tracks
+                // it), so it always states it even where the protocol would
+                // let the anchor imply it.
+                used_node(
+                    &nodes,
+                    i.parent.expect("the shim always names a parent"),
+                    "insert-before parent",
+                );
                 used_node(&nodes, i.id, "insert-before id");
                 if let Some(a) = i.anchor {
                     used_node(&nodes, a, "insert-before anchor");
@@ -239,7 +246,7 @@ fn moving_an_attached_node_is_one_insert_before_and_no_remove() {
     let Op::InsertBefore(i) = ops[0] else {
         panic!("expected insert-before, got {:?}", ops[0])
     };
-    assert_eq!(i.parent, 0);
+    assert_eq!(i.parent, Some(0));
     assert_eq!(i.anchor, Some(node_id(&a)));
     assert_eq!(i.id, node_id(&c));
 

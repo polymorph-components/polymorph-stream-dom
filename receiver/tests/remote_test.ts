@@ -161,7 +161,7 @@ Deno.test("insert-before throws when the anchor is not a child of the parent", (
   assertThrows(
     () => t.insertBefore(0, 10, 12),
     Error,
-    "is not a child of parent",
+    "is not a child of the resolved parent",
   );
 });
 
@@ -176,6 +176,172 @@ Deno.test("insert-before(parent, id, anchor) is a no-op when anchor === id", () 
   t.insertBefore(0, 10, 10);
   t.commit();
   assertEquals(conn.batches.length, 0); // truly nothing happened
+});
+
+// -- parent presence (insert-before/insert-after protocol change) --------
+
+Deno.test("insert-before with no parent (implied from an attached anchor) produces the right parent rid and index", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "div");
+  t.createElement(10, 1, undefined); // parent, attached
+  t.createElement(11, 1, undefined); // anchor, attached under 10
+  t.createElement(12, 1, undefined); // to be inserted before 11, parentless
+  t.insertBefore(0, 10, undefined);
+  t.insertBefore(10, 11, undefined);
+  t.commit();
+  conn.batches.length = 0;
+
+  t.insertBefore(undefined, 12, 11); // parent implied: 10
+  t.commit();
+
+  assertEquals(conn.batches.length, 1);
+  const [record] = conn.batches[0];
+  assertEquals(record[0], MUTATION_TYPE_INSERT_CHILD);
+  assertEquals(record[1], t.ridFor(10));
+  assertEquals(record[3], 0); // 12 lands before 11, which was at index 0
+});
+
+Deno.test("insert-before throws when neither parent nor anchor is given", () => {
+  const { t } = transcoder();
+  t.internString(1, "div");
+  t.createElement(10, 1, undefined);
+  assertThrows(
+    () => t.insertBefore(undefined, 10, undefined),
+    Error,
+    "has neither parent nor anchor",
+  );
+});
+
+Deno.test("insert-before throws when an explicit parent disagrees with the anchor's current parent", () => {
+  const { t } = transcoder();
+  t.internString(1, "div");
+  t.createElement(10, 1, undefined); // parent A
+  t.createElement(20, 1, undefined); // parent B
+  t.createElement(11, 1, undefined); // anchor, attached under A (10)
+  t.insertBefore(0, 10, undefined);
+  t.insertBefore(0, 20, undefined);
+  t.insertBefore(10, 11, undefined);
+  t.createElement(12, 1, undefined);
+  assertThrows(
+    () => t.insertBefore(20, 12, 11), // 11's parent is 10, not 20
+    Error,
+    "disagrees with anchor",
+  );
+});
+
+Deno.test("insert-after appends right after the anchor (attached)", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "div");
+  t.createElement(10, 1, undefined);
+  t.createElement(11, 1, undefined); // anchor
+  t.createElement(12, 1, undefined); // will land right after 11
+  t.insertBefore(0, 10, undefined);
+  t.insertBefore(10, 11, undefined);
+  t.commit();
+  conn.batches.length = 0;
+
+  t.insertAfter(undefined, 12, 11); // parent implied: 10
+  t.commit();
+
+  assertEquals(conn.batches.length, 1);
+  const [record] = conn.batches[0];
+  assertEquals(record[0], MUTATION_TYPE_INSERT_CHILD);
+  assertEquals(record[1], t.ridFor(10));
+  assertEquals(record[3], 1); // right after anchor 11, which is at index 0
+});
+
+Deno.test("insert-after is shadow-only when both nodes are detached", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "div");
+  t.createElement(10, 1, undefined); // detached parent
+  t.createElement(11, 1, undefined); // anchor, detached, under 10
+  t.createElement(12, 1, undefined);
+  t.insertBefore(10, 11, undefined);
+  t.insertAfter(undefined, 12, 11);
+  assertEquals(conn.batches.length, 0);
+
+  // Attaching the parent now serializes the whole subtree, in the right
+  // order: [11, 12].
+  t.insertBefore(0, 10, undefined);
+  t.commit();
+  assertEquals(conn.batches.length, 1);
+  const [record] = conn.batches[0];
+  const div = record[2] as unknown as { children: Array<{ id: string }> };
+  assertEquals(div.children.length, 2);
+  assertEquals(div.children[0].id, t.ridFor(11));
+  assertEquals(div.children[1].id, t.ridFor(12));
+});
+
+Deno.test("insert-after same-parent move (forward): shadow order matches the real DOM", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "div");
+  t.createElement(10, 1, undefined);
+  t.createElement(11, 1, undefined);
+  t.createElement(12, 1, undefined);
+  t.createElement(13, 1, undefined);
+  t.insertBefore(0, 10, undefined);
+  t.insertBefore(0, 11, undefined);
+  t.insertBefore(0, 12, undefined);
+  t.insertBefore(0, 13, undefined);
+  t.commit();
+  conn.batches.length = 0;
+
+  // children: [10, 11, 12, 13]. Move 10 (which sits before 13) to right
+  // after 13 — DOMRemoteReceiver reads `childNodes[3 + 1] || null` (i.e.
+  // null: append) BEFORE moving 10, against the pre-move DOM [10,11,12,13],
+  // so the real DOM ends up [11, 12, 13, 10].
+  t.insertAfter(0, 10, 13);
+  t.commit();
+
+  assertEquals(conn.batches.length, 1);
+  const [record] = conn.batches[0];
+  assertEquals((record[2] as unknown as { id: string }).id, t.ridFor(10));
+  assertEquals(record[3], 4); // pre-move index of anchor 13 (3) + 1
+
+  // Prove the SHADOW order (not just the emitted record) is [11,12,13,10]:
+  // appending after 10 now should not need to go anywhere else — insert a
+  // new node after 10 and confirm it lands at the end.
+  conn.batches.length = 0;
+  t.createElement(14, 1, undefined);
+  t.insertAfter(0, 14, 10);
+  t.commit();
+  assertEquals(conn.batches.length, 1);
+  assertEquals(conn.batches[0][0][3], 4); // shadow is [11,12,13,10], 10 is at index 3
+});
+
+Deno.test("insert-after same-parent move (backward): shadow order matches the real DOM", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "div");
+  t.createElement(10, 1, undefined);
+  t.createElement(11, 1, undefined);
+  t.createElement(12, 1, undefined);
+  t.createElement(13, 1, undefined);
+  t.insertBefore(0, 10, undefined);
+  t.insertBefore(0, 11, undefined);
+  t.insertBefore(0, 12, undefined);
+  t.insertBefore(0, 13, undefined);
+  t.commit();
+  conn.batches.length = 0;
+
+  // children: [10, 11, 12, 13]. Move 13 to right after 10 (backward move —
+  // 13 sits after 10 already). Pre-move DOM childNodes[0 + 1] = 11, so the
+  // real DOM becomes [10, 13, 11, 12].
+  t.insertAfter(0, 13, 10);
+  t.commit();
+
+  assertEquals(conn.batches.length, 1);
+  const [record] = conn.batches[0];
+  assertEquals((record[2] as unknown as { id: string }).id, t.ridFor(13));
+  assertEquals(record[3], 1); // pre-move index of anchor 10 (0) + 1
+
+  // Shadow should now be [10, 13, 11, 12]: inserting after 13 should land
+  // at index 2 (right before 11).
+  conn.batches.length = 0;
+  t.createElement(14, 1, undefined);
+  t.insertAfter(0, 14, 13);
+  t.commit();
+  assertEquals(conn.batches.length, 1);
+  assertEquals(conn.batches[0][0][3], 2);
 });
 
 Deno.test("moving an attached node under a detached parent detaches it", () => {

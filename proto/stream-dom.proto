@@ -62,7 +62,8 @@ message Frame {
     RemoveListener remove_listener = 13;
     Intern intern = 14;
     RegisterTemplate register_template = 15;
-    BindMarker bind_marker = 16;
+    InsertAfter insert_after = 16;
+    BindMarker bind_marker = 17;
   }
 }
 
@@ -91,14 +92,30 @@ message CreatePlaceholder {
   uint32 id = 1;
 }
 
-// Insert `id` under `parent` before `anchor`; no `anchor` appends. Moving
-// an already-inserted node is allowed and is exactly what the DOM's
-// insertBefore does; receivers prefer moveBefore where available so the
-// move preserves node state.
+// Insert `id` before `anchor`, or append it to `parent` when there is no
+// `anchor`. `parent` is required without an `anchor` and optional with
+// one (the anchor's parent is then implied, as in the DOM's insertBefore);
+// a frame with neither is an error. Producers whose renderer never names
+// a parent (Dioxus) omit it; a coalescer keys the op on the anchor's
+// subtree. Moving an already-inserted node is allowed and is exactly what
+// the DOM's insertBefore does; receivers prefer moveBefore where
+// available so the move preserves node state.
 message InsertBefore {
-  uint32 parent = 1;
+  optional uint32 parent = 1;
   uint32 id = 2;
   optional uint32 anchor = 3;
+}
+
+// Insert `id` immediately after `anchor` (under `parent`, which is
+// optional and implied by the anchor). The DOM has no insertAfter, but
+// diffing renderers emit "insert after this sibling" for list appends,
+// and without this op a producer either tracks every node's next sibling
+// or moves the anchor around the new nodes. Same move semantics as
+// InsertBefore.
+message InsertAfter {
+  optional uint32 parent = 1;
+  uint32 id = 2;
+  uint32 anchor = 3;
 }
 
 message Remove {

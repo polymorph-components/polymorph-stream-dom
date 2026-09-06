@@ -6,7 +6,10 @@
 //!   (`create-*` / `clone-template` / `bind-path`), or is `0`, the mount root;
 //! - an `Intern` precedes the first use of every `str-ref`;
 //! - exactly one frame carries `commit`, and it is the last;
-//! - every `insert-before` names a parent that is `0` or previously defined.
+//! - an `insert-before` without an anchor names a parent (`0` or previously
+//!   defined); with an anchor it may omit the parent, which the anchor
+//!   implies (proto/stream-dom.proto `InsertBefore`);
+//! - every `insert-after` names a defined anchor.
 //!
 //! Native, not wasm: `writer.rs` names no WIT bindings precisely so this can
 //! run under `cargo test`.
@@ -138,11 +141,26 @@ fn check_batch(bytes: &[u8], known: &mut Known) -> Vec<proto::Frame> {
                 known.nodes.insert(b.id);
             }
             Op::InsertBefore(i) => {
-                known.node(i.parent, "insert-before parent");
                 known.node(i.id, "insert-before id");
-                if let Some(a) = i.anchor {
-                    known.node(a, "insert-before anchor");
+                if let Some(p) = i.parent {
+                    known.node(p, "insert-before parent");
                 }
+                match i.anchor {
+                    Some(a) => known.node(a, "insert-before anchor"),
+                    // An append has no anchor to imply the parent, so the
+                    // parent is required there and only there.
+                    None => assert!(
+                        i.parent.is_some(),
+                        "insert-before with no anchor must name a parent"
+                    ),
+                }
+            }
+            Op::InsertAfter(i) => {
+                known.node(i.id, "insert-after id");
+                if let Some(p) = i.parent {
+                    known.node(p, "insert-after parent");
+                }
+                known.node(i.anchor, "insert-after anchor");
             }
             Op::Remove(r) => known.node(r.id, "remove"),
             Op::SetText(s) => known.node(s.id, "set-text"),
@@ -250,12 +268,12 @@ fn rebuild_and_update_uphold_stream_invariants() {
             .any(|f| matches!(f.op, Some(proto::frame::Op::CloneTemplate(_)))),
         "mount clones templates"
     );
-    // No stack machine reaches the wire: every insert names its parent, which
-    // `check_batch` already proved was defined.
+    // No stack machine reaches the wire: the mount's append names the mount
+    // root explicitly.
     assert!(
-        frames
-            .iter()
-            .any(|f| matches!(&f.op, Some(proto::frame::Op::InsertBefore(i)) if i.parent == 0)),
+        frames.iter().any(
+            |f| matches!(&f.op, Some(proto::frame::Op::InsertBefore(i)) if i.parent == Some(0))
+        ),
         "the mount attaches something to the mount root"
     );
 
@@ -288,13 +306,15 @@ fn rebuild_and_update_uphold_stream_invariants() {
         "the update inserts the new row"
     );
 
-    // Did the update go through `insert_nodes_after`? That path emits the
-    // extra move op the writer documents (insert the new nodes *before* the
-    // anchor, then move the anchor back in front). It shows up as an
-    // insert-before whose `id` is a node defined in an *earlier* batch and
+    // Did the update go through `insert_nodes_after`? With `insert-after` on
+    // the wire that path is now one op per node, chained anchor-to-anchor,
+    // and the old move-back trick (insert the new nodes *before* the anchor,
+    // then move the anchor back in front of them) is gone. A move-back shows
+    // up as an insert-before whose `id` was defined in an *earlier* batch and
     // whose anchor is one of the just-inserted nodes.
     let mut defined_here = std::collections::HashSet::new();
     let mut saw_move_back = false;
+    let mut saw_insert_after = false;
     for f in &frames2 {
         match &f.op {
             Some(proto::frame::Op::CloneTemplate(c)) => {
@@ -316,19 +336,75 @@ fn rebuild_and_update_uphold_stream_invariants() {
                     saw_move_back = true;
                 }
             }
+            Some(proto::frame::Op::InsertAfter(_)) => saw_insert_after = true,
             _ => {}
         }
     }
     // Appending to the end of a keyed list is dioxus-core 0.7.10's
-    // `insert_nodes_after` (src/diff/iterator.rs:467), which the writer
-    // resolves as insert-before-the-anchor plus one move of the anchor back
-    // in front. Asserted rather than merely recorded because the dependency
-    // is pinned `=0.7.10`: if a Dioxus upgrade changes the diffing decision,
-    // this should say so loudly rather than silently stop covering the path.
+    // `insert_nodes_after` (src/diff/iterator.rs:467). Asserted rather than
+    // merely recorded because the dependency is pinned `=0.7.10`: if a Dioxus
+    // upgrade changes the diffing decision, this should say so loudly rather
+    // than silently stop covering the path.
     assert!(
-        saw_move_back,
-        "the keyed-list append should exercise the insert-after move-back op"
+        saw_insert_after,
+        "the keyed-list append should reach the wire as insert-after"
     );
+    assert!(
+        !saw_move_back,
+        "insert-after replaced the move-back op; nothing should move an \
+         existing node in front of the nodes just inserted"
+    );
+
+    // The lazy-interior symptom: the old writer bound template interiors it
+    // never otherwise named, purely so `insert-before` could state a parent.
+    // Every `bind-path` must now be a node something else refers to.
+    let mut bound = Vec::new();
+    let mut referenced = std::collections::HashSet::new();
+    for f in frames.iter().chain(frames2.iter()) {
+        use proto::frame::Op;
+        match &f.op {
+            Some(Op::BindPath(b)) => {
+                bound.push(b.id);
+                referenced.insert(b.root);
+            }
+            Some(Op::InsertBefore(i)) => {
+                referenced.extend(i.parent);
+                referenced.insert(i.id);
+                referenced.extend(i.anchor);
+            }
+            Some(Op::InsertAfter(i)) => {
+                referenced.extend(i.parent);
+                referenced.insert(i.id);
+                referenced.insert(i.anchor);
+            }
+            Some(Op::Remove(r)) => {
+                referenced.insert(r.id);
+            }
+            Some(Op::SetText(t)) => {
+                referenced.insert(t.id);
+            }
+            Some(Op::SetAttribute(a)) => {
+                referenced.insert(a.id);
+            }
+            Some(Op::SetProperty(p)) => {
+                referenced.insert(p.id);
+            }
+            Some(Op::AddListener(l)) => {
+                referenced.insert(l.listener.as_ref().unwrap().id);
+            }
+            Some(Op::RemoveListener(l)) => {
+                referenced.insert(l.listener.as_ref().unwrap().id);
+            }
+            _ => {}
+        }
+    }
+    assert!(!bound.is_empty(), "this app does bind template interiors");
+    for id in bound {
+        assert!(
+            referenced.contains(&id),
+            "bind-path defined node {id} that no other frame references"
+        );
+    }
 }
 
 #[test]

@@ -129,8 +129,30 @@ impl Batch {
         ));
     }
 
-    pub fn insert_before(&mut self, parent: NodeId, id: NodeId, anchor: Option<NodeId>) {
+    /// Insert `id` before `anchor`, or append it to `parent` when there is
+    /// no `anchor`. `parent` is required without an anchor and optional
+    /// with one — the anchor's parent is implied, as in the DOM's
+    /// `insertBefore` (proto/stream-dom.proto `InsertBefore`). A frame with
+    /// neither is an error, asserted here in debug builds because on the
+    /// wire it is a silently unapplicable op.
+    pub fn insert_before(&mut self, parent: Option<NodeId>, id: NodeId, anchor: Option<NodeId>) {
+        debug_assert!(
+            parent.is_some() || anchor.is_some(),
+            "insert-before needs a parent, an anchor, or both"
+        );
         self.push(proto::frame::Op::InsertBefore(proto::InsertBefore {
+            parent,
+            id,
+            anchor,
+        }));
+    }
+
+    /// Insert `id` immediately after `anchor`. `parent` is optional and
+    /// implied by the anchor (proto/stream-dom.proto `InsertAfter`); there
+    /// is no append form, since appending is `insert_before` without an
+    /// anchor.
+    pub fn insert_after(&mut self, parent: Option<NodeId>, id: NodeId, anchor: NodeId) {
+        self.push(proto::frame::Op::InsertAfter(proto::InsertAfter {
             parent,
             id,
             anchor,
@@ -316,7 +338,7 @@ mod tests {
         let mut b = Batch::new();
         b.create_element(1, 10, None);
         b.create_text(2, "hi");
-        b.insert_before(0, 1, None);
+        b.insert_before(Some(0), 1, None);
         let bytes = b.finish().expect("non-empty batch");
 
         let frames = decode_all(&bytes);
@@ -402,8 +424,15 @@ mod tests {
 
         b.create_element(1, div, None);
         b.create_text(2, "hello");
-        b.insert_before(0, 1, None);
-        b.insert_before(1, 2, None);
+        b.insert_before(Some(0), 1, None);
+        // Append: parent, no anchor.
+        b.insert_before(Some(1), 2, None);
+        // The two anchored, parentless forms, so the TS decoder's
+        // cross-check covers both: after an anchor, and before one.
+        b.create_text(3, "!");
+        b.insert_after(None, 3, 2);
+        b.create_text(4, "?");
+        b.insert_before(None, 4, Some(3));
         b.set_attribute(1, class, None, Some("greeting"));
         b.add_listener(proto::Listener {
             id: 1,

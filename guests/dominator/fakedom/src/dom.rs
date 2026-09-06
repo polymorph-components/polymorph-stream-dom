@@ -212,8 +212,8 @@ pub fn create_comment() -> JsValue {
 
 /// `parent.insertBefore(child, anchor)`. If `child` is already attached
 /// this is a move, and the protocol expresses it as a bare `insert-before`
-/// with no preceding `remove` — see docs/design.md "Tree ops are
-/// `insert-before(parent, id, anchor?)`".
+/// with no preceding `remove` — see docs/design.md "Tree ops". The parent
+/// is always stated: unlike Dioxus, the shadow DOM knows it.
 pub fn insert_before(parent: &NodeData, child: &NodeData, anchor: Option<&NodeData>) {
     // Detach in the shadow first, so an intra-parent move computes its
     // anchor against the post-detach child list, exactly as the DOM does.
@@ -231,7 +231,7 @@ pub fn insert_before(parent: &NodeData, child: &NodeData, anchor: Option<&NodeDa
 
     with_dom(|d| {
         d.batch
-            .insert_before(parent.id, child.id, anchor.map(|a| a.id))
+            .insert_before(Some(parent.id), child.id, anchor.map(|a| a.id))
     });
     request_flush();
 }

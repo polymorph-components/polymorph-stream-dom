@@ -295,10 +295,22 @@ targeting `id` between; all decided per op with a small index keyed by
 
 Consequences:
 
-- **Tree ops are `insert-before(parent, id, anchor?)`.** Every seam bottoms
+- **Tree ops are `insert-before(parent?, id, anchor?)` and
+  `insert-after(parent?, id, anchor)`.** Every seam bottoms
   out in `insertBefore`: react-reconciler, Vue's `createRenderer`, Solid's
   universal renderer, Angular's `Renderer2`, Preact, Dioxus (after
-  resolving its stack). `anchor = none` is append. Inserting an attached
+  resolving its stack). `anchor = none` is append, and only then is
+  `parent` required: with an anchor the parent is implied, as in the DOM,
+  and a renderer that never names one (Dioxus's `WriteMutations`) is not
+  made to reconstruct it. The first spike required `parent` always and
+  paid for it with a producer-side location map plus extra `bind-path`
+  frames for unnamed template interiors; the coalescer argument for the
+  redundancy did not hold, since an op that names its anchor already names
+  the subtree it touches. `insert-after` exists because diffing renderers
+  emit "insert after this sibling" for list appends, and without it a
+  producer either tracks every next sibling or moves the anchor around the
+  new nodes (one extra op per keyed-list append, as the spike measured).
+  Inserting an attached
   node is a move; a receiver should use `Node.moveBefore()` (shipping
   since 2025) where available, which preserves iframe state, focus,
   selection and running animations that `insertBefore` resets. No
@@ -838,29 +850,26 @@ effects (Dominator's `focus()` becomes a `set-focus` query after the
 batch) observes the applied DOM; no receiver-side buffering until `commit`
 was needed.
 
-**`insert-before` requiring `parent` when `anchor` is present is the
-protocol's main friction.** Dioxus's `WriteMutations` never names a
-parent (the DOM's `insertBefore` does not need one). Resolving it cost the
-adapter two maps plus lazy `bind-path` frames for unnamed template
-interiors — e.g. a footer's placeholder at path `[1, 0]` needs its parent
-`[1]` bound purely so `insert-before` can name it; two frames where the
-anchor alone would do. Making `parent` optional when `anchor` is set
-deletes that mechanism. The coalescer argument for a mandatory parent is
-weaker than it looked: an op that names its anchor already names the
-subtree it touches. Open question 13.
-
-**No `insert-after` costs a move per keyed-list append.** Dioxus's
-`insert_nodes_after(anchor, m)` is expressed as `insert-before(…, anchor)`
-for the new nodes then one `insert-before` moving the anchor back in front
-of them; the alternative is an ordered producer-side shadow tree just to
-learn a next sibling. Open question 13.
+**`insert-before` requiring `parent` when `anchor` is present was the
+protocol's main friction, and changed the protocol.** Dioxus's
+`WriteMutations` never names a parent (the DOM's `insertBefore` does not
+need one). Resolving it cost the first adapter two maps plus lazy
+`bind-path` frames for unnamed template interiors — e.g. a footer's
+placeholder at path `[1, 0]` needed its parent `[1]` bound purely so
+`insert-before` could name it; two frames where the anchor alone would do.
+`parent` is now optional when `anchor` is present, and that mechanism is
+gone. Likewise Dioxus's `insert_nodes_after(anchor, m)` was expressed as
+`insert-before(…, anchor)` for the new nodes plus one `insert-before`
+moving the anchor back in front of them, one extra move per keyed-list
+append; `insert-after` is now an op. Both are recorded under "Every op is
+addressable and self-contained".
 
 **`window` and `document` are not addressable.** Dominator's routing
 (`popstate` on `window`) and media queries register listeners on nodes the
 protocol cannot name; the shim panics rather than emit a listener for an
 undefined id. Framework-level global listeners (`resize`, `popstate`,
 `visibilitychange`, media queries) have nowhere to go; the `resize`
-synthetic covers one. Open question 14.
+synthetic covers one. Open question 13.
 
 **Fine-grained commit boundaries fell out of the scheduler.** Dominator's
 signals run in spawned futures; the shim sets a dirty flag on every
@@ -975,16 +984,7 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
     namespaces, imperative `preventDefault` and the wasm-native path —
     sufficient, but the record should then say so instead of leaning on
     mount cost.
-13. **`insert-before`'s `parent`, and an `insert-after`.** The spike's
-    Dioxus adapter pays two maps and extra `bind-path` frames to name a
-    parent the anchor already implies, and one move op per keyed-list
-    append for want of an insert-after. Candidates: make `parent` optional
-    when `anchor` is present (a receiver uses `anchor.parentNode`; a
-    coalescer keys on the anchor's subtree), and add
-    `insert-after(parent?, id, anchor)`. Both are additive on the wire.
-    Decide against the coalescer's key design (question 4) rather than
-    per producer.
-14. **Global listeners.** `window` and `document` have no id, so
+13. **Global listeners.** `window` and `document` have no id, so
     framework-level `popstate`, `visibilitychange`, window `resize` and
     media-query listeners cannot be registered. Options: reserve ids for
     `window`/`document` (they are receiver-side singletons a producer can
