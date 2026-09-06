@@ -8,10 +8,18 @@ rather than re-deriving them; it is not a specification. The WIT under
 ## Purpose
 
 A framework-neutral protocol for streaming DOM mutations from a renderer
-(a "producer": React, Vue, Solid, Dioxus, Preact, ...) to something that
-owns a DOM (a "receiver": a browser page, a server-side renderer, a test
-recorder), across a boundary that may be a wasm component edge, a worker,
-an iframe, or a network.
+(a "producer": Leptos, Dioxus, Svelte, Solid, React, Vue, ...) to something
+that owns a DOM (a "receiver": a browser page, a server-side renderer, a
+test recorder), across a boundary that may be a wasm component edge, a
+worker, an iframe, or a network.
+
+The producers that need this most are the ones compiled to wasm. A
+component has no `web_sys`: every non-JS web framework today reaches the
+DOM through per-call JS glue (wasm-bindgen, Scala.js, js_of_ocaml), one
+untyped crossing per DOM operation, and none of that exists inside a
+component. For them a typed mutation stream is the only path to a DOM,
+not an optimization. JS frameworks are the second audience: they already
+have a DOM and need an adapter to stop touching it.
 
 It is a write-side command protocol, not an observer. The web
 `MutationObserver` reports what already happened to a DOM; this stream is
@@ -23,6 +31,11 @@ worker-dom's transferable mutations — not `MutationRecord`.
 
 - Not a native-widget protocol. The vocabulary is DOM-shaped on purpose;
   generalizing the receiver side to non-DOM trees is a different project.
+- Not a canvas. Flutter web, Uno, Avalonia, Compose Multiplatform for web
+  and egui are the dominant non-JS "wasm web app" story and they bypass
+  the DOM entirely (own text layout, own accessibility tree). They are the
+  alternative this protocol competes with — real text, real a11y, real
+  SEO in exchange for a protocol — not a target.
 - Not a JS framework runtime. Producer adapters plug into each framework's
   existing renderer seam; the frameworks themselves are unchanged.
 - Not a fix for synchronous-layout-dependent application code. See
@@ -177,22 +190,64 @@ same stream; each definition is emitted once per producer instance. Event
 names cross back on `handle-event` as the same `u16`, so steady-state event
 dispatch transfers no string data. (Borrowed from polyengine-dioxus.)
 
-### Templates are an extension, and path binding is one op
+### Templates are core, not an extension
 
-Dioxus, Solid, Svelte, Vue (`insertStaticContent`) all have static
-templates; React does not. `register-template` / `clone-template` are
-optional ops a producer may never emit.
+The frameworks with momentum do not diff. Svelte 5, Solid, Vue Vapor,
+Angular, Lit, Marko, Leptos, Sycamore, Compose all share one idiom: clone
+a compiled static template, bind its holes by walking it, then update
+leaves individually as signals change. Structural ops only appear at
+control-flow boundaries (keyed lists, conditionals). Dioxus has the same
+template shape under its diff. React alone has no templates.
 
-WIT forbids recursive types, so a template is an arena: a flat pre-order
-`list<template-node>` with `u32` indices for roots and children. The arena
-admits malformed index graphs a recursive type could not express;
-receivers validate rather than trust. (Borrowed from polyengine-dioxus.)
+For these producers a mount without templates degrades to one
+`create-element` per node — exactly the cost they were built to avoid,
+and worse across a boundary than in-process. So `register-template` /
+`clone-template` / `bind-path` are core vocabulary that a React adapter
+happens never to emit, not an extension that everyone else opts into.
+This corrects an earlier draft that inherited the wrong emphasis: Dioxus's
+*addressing* (the stack machine) was the part to drop, not its templates.
+
+Two things this buys beyond mount cost:
+
+- **The producer-side structural walk disappears.** Compiled frameworks
+  walk `firstChild`/`nextSibling` after cloning to find their holes; over
+  this protocol the compiler already knows the template's shape, so paths
+  are static and no read is needed. Fine-grained frameworks turn out to be
+  the *least* read-hungry producers once templates are in the protocol.
+  The residual reads are hydration markers, and hydration is push here.
+- **Attribute and text holes need no new ops.** `bind-path` to the hole's
+  node, then ordinary `set-attribute` / `set-text`. An element hole (a
+  nested component, a control-flow site) is a `dynamic` template node,
+  which clones as a placeholder to `insert-before` against.
+
+Templates are an arena, not HTML. WIT forbids recursive types, so a
+template is a flat pre-order `list<template-node>` with `u32` indices for
+roots and children; receivers validate the index graph (range, acyclicity)
+rather than trust it. (Borrowed from polyengine-dioxus.) The alternative —
+ship the template as an HTML string and let the receiver parse it into a
+`<template>`, which is what Svelte and Solid do in-browser — was rejected
+for the same reason positional hydration was: the HTML parser reshapes
+trees (`<tbody>` insertion, `<p>` auto-close, adjacent-text merging), so
+child-index paths into a parser-built tree are not the producer's paths.
+The arena gives the producer the exact tree it asked for. A compiler that
+has the HTML string parses it once, at build time, into the arena.
 
 Interior nodes of a cloned template get ids via `bind-path(root, path,
 id)`, a child-index walk from an explicit root. Positions are reliable
-here because the producer built the tree itself. Self-contained (the root
-is named, not implied by a stack), so a transformer can treat it as opaque
+here because the producer built the tree. Self-contained (the root is
+named, not implied by a stack), so a transformer can treat it as opaque
 bookkeeping.
+
+**Considered and not taken: a cursor.** Compose's `Applier` separates
+*where* (`down(node)` / `up()` maintaining a current node) from *what*
+(`insert(index, node)`, `remove`, `move`), and it is cheaper on the wire
+than repeating a parent id per op when binding deep into a template. It
+is also explicitly addressed — cursor moves name nodes — so it is not the
+Dioxus stack machine. It still loses: every op's target then depends on
+the cursor state, so a coalescer must track the cursor to know what an op
+touches, which is the interpreter-not-filter failure in milder form. The
+wire saving is marginal once `bind-path` names its root and `intern`
+handles the strings; explicit addressing per op stays.
 
 ### Reads are `async`-typed host imports
 
@@ -283,31 +338,63 @@ because every framework lets the handler call it imperatively. Options:
   `click` listener on `<a href>` likewise).
 
 C is required regardless as the only thing a remote receiver can honor.
-Leaning A + C: A for in-process receivers, C everywhere. B is recorded in
-case A's backpressure hazard proves real in practice.
+Phoenix LiveView is the existence proof that C alone is livable: years of
+production apps on a server-side producer with nothing but declarative
+`phx-*` modifiers. Leaning A + C: A for in-process receivers, C
+everywhere. B is recorded in case A's backpressure hazard proves real in
+practice.
 
 ## Producer seams
 
-| Framework | Seam | Reads the DOM? | Adapter strategy |
+Two audiences, with opposite problems. Frameworks compiled to wasm have no
+DOM inside a component and need a seam to reach one *at all*; the question
+is "can I swap what `web_sys` is." JS frameworks have a DOM and need a
+seam to *stop* touching it; the question is "can I intercept `document`."
+
+### Wasm-native producers (the first customers)
+
+| Framework | Model | Seam | Adapter strategy |
 |---|---|---|---|
-| Dioxus | `WriteMutations` trait | no | direct; resolve stack ops producer-side |
-| React | `react-reconciler` HostConfig | barely (hydration aside); instances opaque → return ids | direct; commit = batch; experimental API, expect churn |
-| Vue | `@vue/runtime-core` `createRenderer` | `parentNode`, `nextSibling` | direct + producer-side shadow tree for structural reads |
-| Solid | `solid-js/universal` `createRenderer` | `getParentNode`, `getFirstChild`, `getNextSibling` | direct + shadow tree; loses compiled-template fast path |
-| Angular | `Renderer2` | `parentNode`, `nextSibling` | direct + shadow tree |
-| Preact, Svelte, Lit | none — compiled/direct `document` calls | freely (`name in dom`, `.value`, `innerHTML`, `TreeWalker`) | recording fake DOM (undom/linkedom shape); documented holes |
+| Leptos (tachys) | fine-grained | `Renderer` trait: create/insert/remove/set-attr, `first_child`/`next_sibling`/`get_parent`, `clone_node` | near-verbatim match to this vocabulary; structural reads answered by a producer-side shadow tree. Verify: 0.7 removed the generic renderer parameter from view types over `Dom` for compile time, so this may be a patch rather than a type-level plug |
+| Sycamore | fine-grained | `GenericNode` trait, still generic | direct |
+| Compose HTML (Kotlin) | snapshot state + slot table | Compose runtime `Applier` (`insertTopDown`/`insertBottomUp`/`remove`/`move`/`clear`) | direct; the best-designed seam on the list, the runtime already speaks tree edits. Under-invested upstream in favor of canvas Compose |
+| Dioxus | VDOM | `WriteMutations` trait | direct; resolve stack ops producer-side |
+| Reflex-DOM (Haskell) | FRP | `DomBuilder` typeclass | direct; niche |
+| Dominator, Silkenweb, MoonZoon (Rust); Laminar (Scala.js); Deku (PureScript) | fine-grained / FRP | none — `web_sys` / `dom` direct | recording fake `web_sys` layer; viable because bound output reads little back |
+| Yew, Sauron (Rust); Vugu, go-app, Vecty (Go); Elm; Miso; Halogen; Tokamak | VDOM | none | fake DOM layer, per language |
+
+### JS producers
+
+| Framework | Model | Seam | Reads the DOM? | Adapter strategy |
+|---|---|---|---|---|
+| React | VDOM | `react-reconciler` HostConfig | barely (hydration aside); instances opaque → return ids | direct; commit = batch; experimental API, expect churn |
+| Vue (vnode) | VDOM | `@vue/runtime-core` `createRenderer` | `parentNode`, `nextSibling` | direct + shadow tree |
+| Vue Vapor (3.6 alpha) | compiled, fine-grained | none yet | little | fake DOM; watch for a seam as it matures |
+| Solid | compiled, fine-grained | `solid-js/universal` | `getParentNode`, `getFirstChild`, `getNextSibling` | universal loses the compiled-template fast path; a fake DOM under the *compiled* output keeps it and needs templates in the protocol |
+| Svelte 5 | compiled, runes | none public; `svelte/internal/client/dom/operations` is a thin de facto seam, unstable | `$.template` (innerHTML), `$.child`/`$.sibling` walks | fake DOM; template HTML parsed to arena at build time; walks become static paths |
+| Angular | template VM + signals | `Renderer2` (stable, public) | `parentNode`, `nextSibling` | direct + shadow tree |
+| Lit | tagged templates, value compare | none | `<template>` innerHTML, `TreeWalker` | fake DOM |
+| Preact | VDOM | none | freely (`name in dom`, `.value`) | fake DOM; per-tag property tables |
+| Qwik, Marko, Ripple | fine-grained (Qwik keeps a light vnode mirror) | none | little | fake DOM |
 
 Two strategies, both needed: *seam adapters* where a seam exists,
 *recording fake DOM* where none does. The fake DOM is one adapter for
 every remaining framework plus vanilla JS, and is leaky in known ways
 (prop-vs-attr `in` checks need per-tag tables; template `innerHTML` needs
 an HTML parser; layout reads hit a wall). worker-dom is the prior art and
-its stall is informative.
+its stall is informative. The compiled fine-grained frameworks are the
+*better* fake-DOM candidates, not the worse: their output reads almost
+nothing back, and the template parse happens once per template rather
+than per instance.
 
-Fine-grained producers (Solid) emit one op per signal. That is a good fit
-for the stream and a poor fit for per-batch overhead; the coalescing
+Fine-grained producers emit one op per signal and have a weaker batch
+boundary than a VDOM commit — "whatever flushed in this microtask"
+(Solid's `batch`, Svelte's effect scheduler, Vue's scheduler). `commit`
+maps onto that flush; expect many small batches and lean on the coalescing
 transformer, driven by backpressure and the zero-length readiness probe,
-is the answer rather than a producer-side policy.
+rather than a producer-side policy. Note that these frameworks already pay
+a boundary crossing per DOM op today (JS glue), so a rendezvous stream is
+an improvement before any host-side cleverness.
 
 ## Transports
 
@@ -327,11 +414,36 @@ everywhere. Network is the one tier that differs semantically (no
 synchronous verdict possible), hence option C above and a resync path.
 
 Where frameworks run: Rust/Go/etc. producers compile natively to
-components. JS frameworks either run inside a component (componentize-js;
-the component-model semantics then apply uniformly) or as plain JS with
-the emulated stream — for most JS frameworks the worker is the natural
-home, so the JS-native path is a first-class implementation of the
-protocol, not a shim.
+components and, as noted under Purpose, have no other route to a DOM there.
+JS frameworks either run inside a component (componentize-js; the
+component-model semantics then apply uniformly) or as plain JS with the
+emulated stream — for most JS frameworks the worker is the natural home,
+so the JS-native path is a first-class implementation of the protocol,
+not a shim.
+
+## Prior art that already ships a mutation stream
+
+Two production systems run one mutation protocol across more than one
+boundary. Neither is VDOM-shaped on the wire.
+
+**Blazor.** `RenderBatch` — an edit list plus a reference-frame table —
+is applied by the same JS interop whether the producer is in-process wasm
+(Blazor WebAssembly) or on a server over SignalR (Blazor Server). Its
+internals diff a render tree, but the wire is a mutation batch, and the
+"same protocol, two boundaries" claim has been true in production since
+2019. Its failure modes are the ones to price in for the network tier:
+Server mode's per-keystroke round trip, and per-connection ("circuit")
+state on the server that has to be held for the client's lifetime — the
+resync question here is its reconnect story.
+
+**Phoenix LiveView.** The wire is statics-plus-dynamics: a template's
+static parts are sent once under a fingerprint, then only changed hole
+values. That is `register-template` + `set-text` / `set-attribute` over a
+socket, and it has carried real applications for years. It also
+demonstrates that a network-tier producer manages without imperative
+`preventDefault` (option C alone), and that a template-hole protocol
+beats sending HTML fragments even when the client morphs HTML for other
+paths.
 
 ## Prior measurements worth knowing
 
@@ -377,12 +489,17 @@ definition.
    "essentially never", A + C is settled.
 3. **Islands.** Shape of `mount-foreign(id, kind, props)` or equivalent;
    who owns the node's lifecycle; how events cross back.
-4. **Coalescer window and index.** K and the key shape; interaction with
-   `bind-path`, `bind-marker` and template ops (treat as opaque, never
-   drop unless the root is removed?).
+4. **Coalescer window and index.** K and the key shape. Template and
+   binding ops (`register-template`, `clone-template`, `bind-path`,
+   `bind-marker`) are definitions, kept like `intern` unless the root they
+   define under is removed inside the window.
 5. **Resync.** `reset` semantics and whether a full snapshot is a special
    batch or the normal initial-mount batch replayed.
 6. **Byte encoding.** Whether a `stream<u8>` transformer output is needed at
    all, and if so whether its framing survives chunk boundaries cheaply.
 7. **Conformance corpus format.** Recorded op streams as the shared test
    vector across adapters × transports × encodings; first thing to build.
+8. **First producer.** Leptos (tachys `Renderer`) if its renderer is still
+   pluggable in current releases, else Sycamore; Dioxus as the diffing
+   counterpart. A fine-grained first producer exercises templates,
+   `bind-path` and small-batch coalescing, which a VDOM producer would not.

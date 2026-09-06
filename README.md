@@ -1,10 +1,12 @@
 # `polymorph:vdom`
 
 A framework-neutral protocol for streaming DOM mutations from a renderer
-(React, Vue, Solid, Dioxus, Preact, ...) to something that owns a DOM,
-across a wasm component edge, a worker, an iframe, or a network — one op
-vocabulary, one stream shape, with transformers (coalescing, recording,
-wire encoding) written once for every framework.
+(Leptos, Dioxus, Svelte, Solid, React, Vue, ...) to something that owns a
+DOM, across a wasm component edge, a worker, an iframe, or a network — one
+op vocabulary, one stream shape, with transformers (coalescing, recording,
+wire encoding) written once for every framework. Frameworks compiled to
+wasm are the first audience: a component has no `web_sys`, so for them
+this is the only route to a DOM.
 
 **Status: design stage.** There is no code. Start with
 [`docs/design.md`](docs/design.md), which records the decisions and their

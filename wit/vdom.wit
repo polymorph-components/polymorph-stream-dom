@@ -87,7 +87,12 @@ interface mutations {
 
   record listener { id: node-id, name: str-ref, opts: listener-flags }
 
-  // --- Templates (optional extension; a producer may never emit these) ---
+  // --- Templates ---
+  //
+  // Core vocabulary, not an extension: every non-diffing framework (and
+  // Dioxus) mounts by cloning compiled templates and binding holes, and
+  // without these ops a mount degrades to one create per node. A producer
+  // without templates (React) simply never emits them.
 
   record template-attr { name: str-ref, ns: option<str-ref>, value: string }
 
@@ -101,11 +106,16 @@ interface mutations {
 
   /// WIT forbids recursive types, so a template is a flat pre-order arena.
   /// A receiver validates indices (range, acyclicity) rather than trusting
-  /// them.
+  /// them. An arena rather than an HTML string because the HTML parser
+  /// reshapes trees, which would make `bind-path` paths unreliable; a
+  /// compiler that has the HTML parses it into the arena at build time.
   variant template-node {
     element(template-element),
     text(string),
-    /// A hole to be filled by later ops addressed via `bind-path`.
+    /// An element hole (nested component, control-flow site). Clones as a
+    /// placeholder to `insert-before` against. Text and attribute holes
+    /// need no marker: `bind-path` to the node, then `set-text` /
+    /// `set-attribute`.
     dynamic,
   }
 
