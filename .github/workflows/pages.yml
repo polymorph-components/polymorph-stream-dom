@@ -6,6 +6,10 @@ name: pages
 on:
   push:
     branches: [main]
+  # Redeploy after a bench run so its gh-pages history lands under /bench/.
+  workflow_run:
+    workflows: [bench]
+    types: [completed]
 
 concurrency:
   group: pages-${{ github.ref }}

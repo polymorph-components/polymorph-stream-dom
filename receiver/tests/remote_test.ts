@@ -513,3 +513,37 @@ Deno.test("onCommit runs after mutate, and only when there is something to mutat
   assertEquals(conn.batches.length, 1); // no new mutate() call
   assertEquals(commits, 2);
 });
+
+// Regression for the O(ids × removed nodes) `#forgetSubtree` bug: it used
+// to scan every entry in `#byProducerId` per removed node, so a 10k-row
+// `clear` (~10k-50k live ids, one `remove` of the whole list) took
+// SECONDS (measured 7+ s against a comparable ~50k-id map before the
+// `ShadowNode.ids` fix, vs. single-digit ms after). 200ms is a coarse
+// tripwire — any real regression back to the old behavior blows well past
+// it at this scale, but ordinary jitter under `deno test` should not.
+Deno.test("remove() of a 10k-node subtree is fast and empties the id map (perf regression)", () => {
+  const { t } = transcoder();
+  t.internString(1, "div");
+  t.createElement(1, 1, undefined); // the parent whose subtree gets removed
+  t.insertBefore(0, 1, undefined);
+
+  const N = 10_000;
+  for (let id = 2; id <= N + 1; id++) {
+    t.createElement(id, 1, undefined);
+    t.insertBefore(1, id, undefined);
+  }
+  assertEquals(t.idCount, N + 2); // root (0) + parent (1) + N children
+
+  const start = performance.now();
+  t.remove(1);
+  const elapsed = performance.now() - start;
+
+  assertEquals(t.idCount, 1); // only the root (id 0) survives
+  if (elapsed >= 200) {
+    throw new Error(
+      `remove() of a 10k-node subtree took ${
+        elapsed.toFixed(1)
+      }ms (expected < 200ms) — likely a regression back to the O(ids x nodes) #forgetSubtree scan`,
+    );
+  }
+});
