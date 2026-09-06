@@ -7,18 +7,18 @@ default: check test
 # component target; TS: receiver + web).
 check:
     cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
-    cargo clippy --manifest-path guests/dominator/Cargo.toml --workspace --target wasm32-wasip2 -- -D warnings
+    cargo clippy --manifest-path guests/web-sys/Cargo.toml --workspace --target wasm32-wasip2 -- -D warnings
     deno task check
 
 # Native unit tests (encoder, transcoder fixtures) + receiver tests.
 test:
     cargo test --workspace --exclude dioxus-todomvc
-    cargo test --manifest-path guests/dominator/Cargo.toml --workspace
+    cargo test --manifest-path guests/web-sys/Cargo.toml --workspace
     deno task test
 
 # Build both demo components into build/ and translate them at build time
 # (the demos ship no translator).
-components: (component "dioxus-todomvc" "Cargo.toml" "dioxus_todomvc") (component "dominator-todomvc" "guests/dominator/Cargo.toml" "dominator_todomvc")
+components: (component "dioxus-todomvc" "Cargo.toml" "dioxus_todomvc") (component "dominator-todomvc" "guests/web-sys/Cargo.toml" "dominator_todomvc")
 
 component name manifest artifact:
     #!/usr/bin/env bash

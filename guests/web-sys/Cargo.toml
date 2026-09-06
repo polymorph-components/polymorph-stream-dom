@@ -21,7 +21,7 @@ members = [
   "shims/web-sys",
   "shims/wasm-bindgen-futures",
   "fakedom",
-  "todomvc",
+  "dominator-todomvc",
 ]
 
 [workspace.package]
