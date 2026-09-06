@@ -1,17 +1,24 @@
-# `polymorph:vdom`
+# `polymorph:stream-dom`
 
 A framework-neutral protocol for streaming DOM mutations from a renderer
-(Leptos, Dioxus, Svelte, Solid, React, Vue, ...) to something that owns a
-DOM, across a wasm component edge, a worker, an iframe, or a network — one
-op vocabulary, one stream shape, with transformers (coalescing, recording,
-wire encoding) written once for every framework. Frameworks compiled to
-wasm are the first audience: a component has no `web_sys`, so for them
+(Leptos, Dioxus, Svelte, Solid, React, Vue, anything written against
+remote-dom, ...) to something that owns a DOM, across a wasm component
+edge, a worker, an iframe, or a network — one op vocabulary, one byte
+encoding on every tier, with transformers (coalescing, recording,
+template expansion) written once for every framework. Frameworks compiled
+to wasm are the first audience: a component has no `web_sys`, so for them
 this is the only route to a DOM.
+
+Nearest relative: Shopify's [remote-dom]. This protocol keeps its own
+wire (streaming with backpressure, templates, anchor addressing,
+hydration) and interoperates with remote-dom at both of its boundaries,
+so remote-dom UIs are producers and remote-dom hosts and host elements
+are receivers and islands. See the design record.
 
 **Status: design stage.** There is no code. Start with
 [`docs/design.md`](docs/design.md), which records the decisions and their
-reasons; [`wit/vdom.wit`](wit/vdom.wit) is the same decisions as a draft
-schema (parses with `wasm-tools component wit wit/`).
+reasons; [`wit/stream-dom.wit`](wit/stream-dom.wit) is the same decisions
+as a draft schema (parses with `wasm-tools component wit wit/`).
 
 The immediate predecessor is
 [polyengine-dioxus](https://github.com/lannbot/polyengine-dioxus), a
@@ -20,3 +27,4 @@ carried over and credited in the design record; its Dioxus-shaped parts
 (the stack machine in particular) are deliberately not.
 
 [polyengine]: https://github.com/polymorph-components/polyengine
+[remote-dom]: https://github.com/Shopify/remote-dom

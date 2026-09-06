@@ -1,4 +1,4 @@
-# polymorph:vdom — design record
+# polymorph:stream-dom — design record
 
 Status: design stage. Nothing here is implemented. This document records
 decisions and their reasons so that later work argues with the reasons
@@ -82,7 +82,7 @@ elements meeting a `stream.read` with room for M copies `min(N, M)`; both
 operations complete with a partial count and the writer re-issues. One
 read never spans two writes; one write may be split across many reads.
 There is no message framing at the transport level: the stream knows
-elements, not batches. A zero-length write is a readiness probe (allowed,
+bytes, not frames or batches. A zero-length write is a readiness probe (allowed,
 not guaranteed, to wait for a pending read).
 
 **Exclusive lock.** With sync or stackless lifting, an export call
@@ -94,50 +94,109 @@ stackful to stay out of the way.
 ## Architecture
 
 ```
-producer adapter ──▶ stream<operation> ──▶ [transformers]* ──▶ receiver
-(one per framework)                        coalesce, record,      (browser DOM,
-                                           encode-for-wire,       SSR, test
-                                           multiplex              recorder)
+producer adapter ──▶ stream<u8> ──▶ [transformers]* ──▶ receiver
+(one per framework)  (op frames)    coalesce, record,    (browser DOM,
+                                    expand, multiplex    SSR, test
+                                                         recorder)
 ```
 
-- Every hop carries the same element type, `operation`.
-- Transformers have the shape `func(in: stream<operation>) ->
-  stream<operation>` and are written once for all frameworks. Coalescing
-  is the canonical one; a remote-hop encoder (`stream<operation> ->
-  stream<u8>`) is another.
-- The Component Model embedding is the *reference semantics*. A JS-native
-  adapter (for a framework running outside any component) emulates the
-  rendezvous stream — `read(n)` / `write(buf)` returning promises with the
-  min-copy rule — so the conformance corpus runs unchanged against it.
+- Every hop carries the same bytes: a sequence of length-prefixed op
+  frames, one encoding on every tier (in-process `stream<u8>`,
+  `postMessage` of a transferred buffer, a socket, a corpus file).
+- Transformers have the shape `func(in: stream<u8>) -> stream<u8>` and are
+  written once for all frameworks. Coalescing is the canonical one.
+- The Component Model embedding is the *reference semantics* for
+  backpressure and lifecycle. A producer or receiver running outside any
+  component (a JS framework in a worker, a Node SSR receiver) speaks the
+  same bytes with `read(n)` / `write(buf)` promises under the same
+  min-copy rule; it is a first-class implementation of the protocol, not
+  an emulation, and the conformance corpus runs unchanged against it.
 - The vocabulary has two layers. *Definitional* ops (`intern`,
   `register-template`, `clone-template`, `bind-path`) can be compiled away
   by a transformer into the *structural core* (`create-*`,
   `insert-before`, `remove`, `set-*`, listeners, `commit`). The core is
   isomorphic to a `MutationRecord` stream, so a minimal receiver is small,
-  a recorder is a `MutationObserver`, and during bring-up an
-  expand-then-encode transformer can drive an existing browser receiver
-  (Shopify remote-dom's `DOMRemoteReceiver`, rrweb's `Replayer`) before
-  a native one exists.
+  a recorder is a `MutationObserver`, and during bring-up an expand
+  transformer plus a thin shim can drive an existing browser receiver
+  (Shopify remote-dom's `DOMRemoteReceiver`, rrweb's `Replayer`) before a
+  native one exists.
 
 ## Protocol decisions
 
-### Element type is `operation`, never `list<operation>`
+### The channel is `stream<u8>` of op frames
 
-A `list` element is lifted and lowered atomically: the receiver must have
-room for the whole batch before the rendezvous completes, cannot accept
-part of it, and — for a wasm receiver — `realloc`s the entire batch into
-linear memory or OOM-traps. It also forbids any transformer from working
-across batch boundaries without holding several whole batches. With
-`stream<operation>`, receiver memory is a tuning knob (read buffer of K
-elements), backpressure is per element, and processing may start before
-production finishes.
+The WIT `operation` variant and its records are the *schema*; the wire is
+its byte encoding (below). No function takes an `operation` value.
 
-Elements are small but not fixed-size: any op carrying a `string` lowers
-through `realloc` on a wasm receiver. Interning bounds the static names;
-dynamic text (`set-text`, `create-text`) is inherently variable. If
-byte-bounded receiving turns out to matter, that is the argument for a
-`stream<u8>` encoding as a *transformer output*, not as the core element
-type — typed elements are what let anything sit in the middle.
+An earlier draft made the channel `stream<operation>`, typed end to end,
+with a byte encoding as a transformer output for the remote hop. That was
+two representations of one protocol: the network tier and the recorded
+corpus need bytes regardless, so the typed hop only added a second form
+and the converters between them. Once the encoding is unavoidable, the
+question is whether the typed in-process hop earns its keep, and it does
+not:
+
+- **Cost.** The measured 0.15–0.8 µs/op was canonical-ABI lift of a
+  variant with strings, plus one JS object per op on a JS receiver and one
+  `realloc` per string on a wasm receiver. A `stream<u8>` write is a
+  memcpy of the chunk; a receiver decodes with a `DataView` switch and no
+  per-op allocation, and a wasm receiver reads strings as slices of the
+  chunk buffer.
+- **Evolution.** A WIT variant cannot gain a case compatibly; every new op
+  is a version bump and a digest mismatch. Length-prefixed frames give
+  skip-unknown, so additions (shadow DOM, future definitional ops) land
+  without breaking receivers that predate them.
+- **Byte-bounded receiving.** Ops are variable-size; a read buffer of K
+  elements bounds nothing. A read buffer of K bytes does.
+- **Maturity.** `stream<u8>` is the most exercised path in the async
+  proposal (`wasi:http` bodies, `wasi:io`); streams of complex variants
+  are the least, in both wasmtime and jco.
+- **Precedent.** worker-dom (typed arrays + string table), Blazor
+  `RenderBatch`, Dioxus/sledgehammer and rrweb all ship bytes or JSON;
+  none ships an IDL-typed element stream.
+
+What typed elements gave up: canonical-ABI validation of UTF-8 and bounds
+(now the decoder's job — which is where it belongs anyway if producers can
+be untrusted, open question 10), typed values in traces (the corpus
+tooling needs a frame-to-text decoder on day one regardless), and codecs
+written by hand per language. The codec is ~20 frame layouts, and the
+schema in WIT remains the single source of truth for shape; a generator is
+not warranted until a third language appears.
+
+`queries` and `events` stay typed component calls: low volume, RPC-shaped,
+and `handle-event` carries `borrow<dom-event>`, which has no byte form and
+is the whole of option A under Events. The remote tier encodes events
+separately, as it always had to.
+
+**Never `list<u8>` per batch.** A `list` is lifted and lowered atomically:
+the receiver must have room for the whole batch before the rendezvous
+completes, cannot accept part of it, and a wasm receiver `realloc`s the
+entire batch or OOM-traps. It also forbids a transformer from working
+across batch boundaries without holding several whole batches. With the
+stream, receiver memory is a tuning knob, backpressure is per chunk, and
+processing may start before production finishes.
+
+### Encoding
+
+A deterministic mapping from the WIT types; the WIT is normative for
+shape, this section for bytes. Little-endian throughout.
+
+- **Frame**: `u32 len`, then `len` bytes: `u8 tag` (the `operation` case
+  index) followed by the case's fields in declaration order. A receiver
+  that does not know `tag` skips `len` bytes.
+- **Scalars**: `u8`/`u16`/`u32`/`s64`/`f64` fixed-width; `bool` as `u8`.
+- **`string`**: `u32` byte length, UTF-8. **`list<T>`**: `u32` count,
+  elements. **`option<T>`**: `u8` presence, then `T` if 1. **`flags`**:
+  one `u8` per 8 declared bits. Nested `record`s inline; nested `variant`s
+  as `u8` tag then fields.
+- The stream has no header; versioning is per package (digest-checked at
+  instantiation) with skip-unknown for additive change.
+
+Rendezvous copies split at byte granularity, so a frame may straddle two
+reads; decoders keep partial-frame state. Producers typically encode a
+whole batch into one buffer and issue one write, but nothing depends on
+it. Fixed-width over varint is a simplicity choice; revisit only with a
+measurement (open question 6).
 
 ### Batches are framed by a `commit` op, not by the transport
 
@@ -418,16 +477,20 @@ seam to *stop* touching it; the question is "can I intercept `document`."
 | Lit | tagged templates, value compare | none | `<template>` innerHTML, `TreeWalker` | fake DOM |
 | Preact | VDOM | none | freely (`name in dom`, `.value`) | fake DOM; per-tag property tables |
 | Qwik, Marko, Ripple | fine-grained (Qwik keeps a light vnode mirror) | none | little | fake DOM |
+| Anything written against remote-dom | any | `RemoteConnection` (`mutate`, `call`) | via its polyfill | transcoding adapter; see "Interop with remote-dom" |
 
 Two strategies, both needed: *seam adapters* where a seam exists,
 *recording fake DOM* where none does. The fake DOM is one adapter for
 every remaining framework plus vanilla JS, and is leaky in known ways
 (prop-vs-attr `in` checks need per-tag tables; template `innerHTML` needs
 an HTML parser; layout reads hit a wall). worker-dom is the prior art and
-its stall is informative. The compiled fine-grained frameworks are the
-*better* fake-DOM candidates, not the worse: their output reads almost
-nothing back, and the template parse happens once per template rather
-than per instance.
+its stall is informative. The fake DOM itself is not ours to write:
+`@remote-dom/polyfill` is a maintained, deployed minimal DOM for workers
+with mutation hooks at the node level, where `nextSibling` is available
+and anchor-based frames fall out directly. The compiled fine-grained
+frameworks are the *better* fake-DOM candidates, not the worse: their
+output reads almost nothing back, and the template parse happens once per
+template rather than per instance.
 
 Fine-grained producers emit one op per signal and have a weaker batch
 boundary than a VDOM commit — "whatever flushed in this microtask"
@@ -437,6 +500,46 @@ transformer, driven by backpressure and the zero-length readiness probe,
 rather than a producer-side policy. Note that these frameworks already pay
 a boundary crossing per DOM op today (JS glue), so a rendezvous stream is
 an improvement before any host-side cleverness.
+
+## Interop with remote-dom
+
+Shopify's remote-dom is the nearest relative, and its ecosystem is worth
+more than its wire. Interop happens at its two boundaries, in both
+directions, with this protocol's frames in the middle and nothing of its
+record format on the wire:
+
+- **Producer side.** Everything remote-dom ships for the remote end
+  (`@remote-dom/polyfill`, `RemoteRootElement`, `RemoteElement`, the
+  React/Preact/Svelte/signals packages) talks to one object:
+  `RemoteConnection { mutate(records), call(id, method, ...args) }`. An
+  adapter implementing that interface makes every existing remote-dom UI
+  a producer unmodified. It transcodes: shadow tree for `(parent, index)`
+  → anchor, subtree-carrying `INSERT_CHILD` flattened to per-node frames,
+  `UPDATE_PROPERTY` with the event-listener type → `add-listener`. Same
+  shape as Dioxus's stack resolution, in the same place; the costs of
+  their format apply only JS-to-JS inside the worker, before encoding.
+- **Receiver side.** A `frames → RemoteMutationRecord[]` shim (expand
+  templates, shadow tree for indices) lets a wasm-native producer render
+  into any host that already speaks remote-dom. It is also the bring-up
+  receiver: `DOMRemoteReceiver` works before a native receiver exists.
+- **Host elements.** Custom elements built for remote-dom hosts are
+  islands under this protocol's receiver as-is. No shim.
+
+The split: Shopify maintains the polyfill, the framework packages, the
+element kits and the record format's stability; this project maintains
+two shims that track a four-record format.
+
+Two gaps the shims cannot close:
+
+- **Function-valued properties.** remote-dom lets a remote pass a callback
+  as a property, proxied over `@quilted/threads`. A function cannot cross
+  this wire. Their `remoteEvents` path is real listener registration and
+  maps cleanly; legacy function-props are rejected by the adapter with a
+  clear error rather than half-supported.
+- **Open-ended `call(id, method, args)`.** Theirs is any method on a host
+  element; `queries` here is a fixed set. Closing it is one addition — a
+  generic `call-method(id, name, args)` async import returning a
+  structured value — which islands want anyway (open question 3).
 
 ## Transports
 
@@ -452,25 +555,25 @@ Design to the weakest transport; the others buy latency, not semantics.
 
 Because the stream is unbuffered, backpressure is uniform: the host decides
 when to issue the next read and the guest sees identical semantics
-everywhere. Network is the one tier that differs semantically (no
+everywhere. The bytes are identical too: the worker tier transfers the
+chunk buffer with `postMessage` (zero-copy), the network tier writes it to
+the socket. Network is the one tier that differs semantically (no
 synchronous verdict possible), hence option C above and a resync path.
 
 Where frameworks run: Rust/Go/etc. producers compile natively to
 components and, as noted under Purpose, have no other route to a DOM there.
 JS frameworks either run inside a component (componentize-js; the
-component-model semantics then apply uniformly) or as plain JS with the
-emulated stream — for most JS frameworks the worker is the natural home,
-so the JS-native path is a first-class implementation of the protocol,
-not a shim.
+component-model semantics then apply uniformly) or as plain JS writing the
+same frames — for most JS frameworks the worker is the natural home.
 
 ## Prior art
 
-Nothing existing can be adopted whole: no prior system types its protocol
-as a component-model interface, puts templates on the wire as a reusable
-clone-and-bind primitive, or exposes its optimizer as a composable
-transformer. Everything else here has an existing implementation to
-compare against, and several are reusable as bring-up receivers or as
-lists of edge cases.
+Nothing existing can be adopted whole: no prior system runs as a
+component-model stream with rendezvous backpressure, puts templates on the
+wire as a reusable clone-and-bind primitive, or exposes its optimizer as a
+composable transformer. Everything else here has an existing
+implementation to compare against, and several are reusable as bring-up
+receivers or as lists of edge cases.
 
 ### Closest: a DOM built elsewhere, mutations shipped to a real one
 
@@ -478,10 +581,14 @@ lists of edge cases.
 worker or iframe builds a tree against a fake `document`; an id-addressed
 mutation stream (`insertChild`, `removeChild`, `updateText`,
 `updateProperty`) reaches a host receiver; events serialize back. In
-production in Shopify checkout extensions. If this protocol did not need
-wasm typing and templates, remote-dom's vocabulary could be used verbatim.
-Its two design choices worth copying: host UI exposed as custom elements
-(see islands), and an explicit refusal of synchronous reads.
+production in Shopify checkout extensions. The nearest relative of this
+design, and the one it interoperates with (see "Interop with remote-dom").
+Not adoptable as the wire: inserts are `(parent, index)` and carry whole
+serialized subtrees, `mutate(records)` is fire-and-forget with no
+backpressure, there are no templates, no interning, no hydration, and
+(verify) no namespaces. Its two design choices worth copying: host UI
+exposed as custom elements (see islands), and an explicit refusal of
+synchronous reads.
 
 **AMP worker-dom.** Same shape, main thread ↔ worker, with a typed-array
 encoding and a string table (this design's `intern`). Its answers to the
@@ -573,7 +680,8 @@ order-of-magnitude):
   landed upstream, ~0.7–0.8 µs/op overhead on string-heavy ops, ~0.15 µs/op
   on single-field variants; 1.1–1.8x on the channel, which is itself a
   small fraction of DOM work. Earlier figures (5 µs/op) were an interpreter
-  bug, not the component model.
+  bug, not the component model. The byte protocol is what this design now
+  ships; the typed figures are what it declined to pay.
 - Stream vs synchronous call transport: bulk-op deltas within noise. The
   call transport was retired for a semantic reason — no host-retained
   handle, so background guest work could not wake the instance between
@@ -607,7 +715,8 @@ definition.
    backpressure when a DOM event arrives, with a stackful scheduler? If
    "essentially never", A + C is settled.
 3. **Islands.** Custom elements as sketched above; remaining: the
-   `custom` payload family and a structured `value` variant for props.
+   `custom` payload family, a structured `value` variant for props, and a
+   generic `call-method` query (also what remote-dom interop needs).
 4. **Coalescer window and index.** K and the key shape. Template and
    binding ops (`register-template`, `clone-template`, `bind-path`,
    `bind-marker`) are definitions, kept like `intern` unless the root they
@@ -615,10 +724,12 @@ definition.
 5. **Resync.** `reset` semantics and whether a full snapshot is a special
    batch or the normal initial-mount batch replayed. Also the id-space
    exhaustion path, since ids are never reused.
-6. **Byte encoding.** Whether a `stream<u8>` transformer output is needed at
-   all, and if so whether its framing survives chunk boundaries cheaply.
-7. **Conformance corpus format.** Recorded op streams as the shared test
-   vector across adapters × transports × encodings; first thing to build.
+6. **Encoding details.** Fixed-width vs varint integers; a maximum frame
+   length; whether `intern` slots should be `u16`. Decide with a
+   measurement on the corpus, not in advance.
+7. **Conformance corpus format.** Recorded frame streams as the shared test
+   vector across adapters × transports; first thing to build, together
+   with the frame-to-text decoder.
 8. **First producer.** Leptos (tachys `Renderer`) if its renderer is still
    pluggable in current releases, else Sycamore; Dioxus as the diffing
    counterpart. A fine-grained first producer exercises templates,

@@ -1,19 +1,24 @@
-/// polymorph:vdom — a framework-neutral DOM-mutation stream.
+/// polymorph:stream-dom — a framework-neutral DOM-mutation stream.
 ///
 /// DRAFT. This file is the schema form of docs/design.md; read that for
 /// the reasons. Every decision here is provisional until the conformance
 /// corpus and a first pair of adapters exist.
 ///
-/// A producer (any renderer) emits `operation`s on a `stream<operation>`;
-/// a receiver (something owning a DOM) applies them. Transformers may sit
-/// between with the shape `func(in: stream<operation>) -> stream<operation>`.
-/// The stream is an unbuffered rendezvous channel of individual ops —
-/// batches are framed by the `commit` op, never by the element type.
-package polymorph:vdom@0.1.0;
+/// A producer (any renderer) emits op frames on a `stream<u8>`; a receiver
+/// (something owning a DOM) applies them. Transformers may sit between
+/// with the shape `func(in: stream<u8>) -> stream<u8>`. The stream is an
+/// unbuffered rendezvous channel of bytes — frames are length-prefixed,
+/// batches are framed by the `commit` op, and the transport knows neither.
+package polymorph:stream-dom@0.1.0;
 
-/// The op vocabulary. Normative once out of draft: any change to this
-/// interface bumps the package version, and instantiation is
-/// digest-checked so a mismatch fails early.
+/// The op vocabulary, as the SCHEMA of the byte encoding. No function takes
+/// an `operation` value; the types here define the layout of each frame
+/// (docs/design.md "Encoding": `u32 len`, `u8 tag` = case index, fields in
+/// declaration order, little-endian, `u32`-prefixed UTF-8 strings and
+/// lists, `u8` option presence). Normative once out of draft: a change to
+/// an existing case bumps the package version, and instantiation is
+/// digest-checked; a new case is additive, since receivers skip unknown
+/// tags by `len`.
 ///
 /// Invariants every producer upholds and every transformer preserves:
 /// - Every op names its target(s) explicitly. There is no implicit stack,
@@ -225,7 +230,7 @@ interface events {
 }
 
 world producer {
-  use mutations.{operation, node-id, str-ref};
+  use mutations.{node-id, str-ref};
   use events.{payload, dom-event};
 
   import queries;
@@ -234,11 +239,12 @@ world producer {
   /// producer's prerendered markup: the first batch binds ids with
   /// `bind-marker` and creates no nodes.
   ///
-  /// Returning the stream makes the channel's lifecycle structural: it
+  /// The stream carries `mutations.operation` frames in the documented
+  /// encoding. Returning it makes the channel's lifecycle structural: it
   /// exists iff the producer started, once, tied to this instance. The
   /// receiver retains the readable end for the instance's lifetime; a
   /// parked scheduler is then a documented idle state, not a deadlock.
-  export run: async func(hydrate: bool) -> stream<operation>;
+  export run: async func(hydrate: bool) -> stream<u8>;
 
   /// Dispatch one event to the listener registered on `target` under the
   /// interned `name`. `mounted` is synthetic: the receiver fires it once
@@ -252,8 +258,8 @@ world producer {
   );
 }
 
-/// A stream-to-stream transformer (coalescer, recorder, multiplexer).
+/// A stream-to-stream transformer (coalescer, recorder, expander,
+/// multiplexer). Frames in, frames out; a frame may straddle a read.
 world transformer {
-  use mutations.{operation};
-  export transform: func(input: stream<operation>) -> stream<operation>;
+  export transform: func(input: stream<u8>) -> stream<u8>;
 }
