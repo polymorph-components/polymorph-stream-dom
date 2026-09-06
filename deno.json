@@ -1,0 +1,27 @@
+{
+  "workspace": ["./receiver", "./web"],
+  "imports": {
+    "@polyengine/runtime/embedder": "jsr:@polyengine/runtime@^0.6.2/embedder",
+    "@polyengine/runtime/shim": "jsr:@polyengine/runtime@^0.6.2/shim",
+    "@polyengine/runtime/plan": "jsr:@polyengine/runtime@^0.6.2/plan",
+    "@polyengine/translator": "jsr:@polyengine/translator@^0.6.2",
+    "@polyengine/protocol": "jsr:@polyengine/protocol@^0.3.1",
+    "@polyengine/wasi": "jsr:@polyengine/wasi@^0.6.2",
+    "@remote-dom/core": "npm:@remote-dom/core@^1.11.1",
+    "@remote-dom/core/receivers": "npm:@remote-dom/core@^1.11.1/receivers",
+    "@remote-dom/core/elements": "npm:@remote-dom/core@^1.11.1/elements",
+    "@std/assert": "jsr:@std/assert@^1",
+    "@std/path": "jsr:@std/path@^1",
+    "@std/fs": "jsr:@std/fs@^1",
+    "@std/http/file-server": "jsr:@std/http@^1/file-server",
+    "playwright": "npm:playwright@^1.58"
+  },
+  "compilerOptions": {
+    "lib": ["deno.ns", "dom", "dom.iterable", "esnext"],
+    "strict": true
+  },
+  "tasks": {
+    "check": "deno check receiver/src receiver/tests web/build.ts web/translate.ts web/entry.ts web/e2e",
+    "test": "deno test --allow-read=. receiver/tests/"
+  }
+}
