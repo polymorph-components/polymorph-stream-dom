@@ -890,6 +890,27 @@ an undefined id. Fixed by making a listener's target a node id or a
 global (see "Events"); the Dominator demo's filters are hash links driven
 by a window `hashchange` listener.
 
+**Benchmarks, and the first producer comparison.** `bench/` runs a
+js-framework-benchmark-shaped rows app (identical markup and a fixed-seed
+label PRNG in both producers) across producer × receiver × transport ×
+operation. Statistics belong to tachometer (variants interleaved across
+fresh page loads, differences reported as confidence intervals); history
+goes to gh-pages; the one gate is the *wire shape* — frames, bytes,
+batches per producer × operation — which is deterministic and compared
+exactly against `bench/wire-baseline.json`, so a change there is an
+adapter or protocol change that must be intentional. The first baseline
+is the prediction under "Templates are core" measured: creating 1,000
+rows costs Dioxus 16,007 frames / 180 KB (one `clone-template` and a few
+`bind-path`s per row) and Dominator 26,005 frames / 285 KB (one create
+and one insert per node, since a fine-grained framework without compiled
+templates mounts node by node); a keyed swap is two frames for both, but
+Dominator's is two moves (futures-signals' `swap` is two `move_from_to`).
+Dominator also lands bulk operations in two commits to Dioxus's one: the
+row list and its per-row signals flush in separate scheduler turns.
+Timings are not gated: GitHub runners are too noisy for a threshold, and
+the arm64 dev box cannot run chromedriver at all, so the numbers are read
+from the history page.
+
 **Fine-grained commit boundaries fell out of the scheduler.** Dominator's
 signals run in spawned futures; the shim sets a dirty flag on every
 mutation and a flusher task sends one batch per scheduler turn, then runs

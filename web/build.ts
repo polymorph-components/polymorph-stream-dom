@@ -13,7 +13,12 @@ const root = join(webDir, "..");
 const buildDir = join(root, "build");
 const distDir = join(root, "dist");
 
-const components = ["dioxus-todomvc", "dominator-todomvc"];
+const components = [
+  "dioxus-todomvc",
+  "dominator-todomvc",
+  "dioxus-bench",
+  "dominator-bench",
+];
 
 for (const name of components) {
   const wasm = join(buildDir, `${name}.component.wasm`);
@@ -33,29 +38,33 @@ for (const name of components) {
 await Deno.remove(distDir, { recursive: true }).catch(() => {});
 await ensureDir(distDir);
 
-// Bundle the browser entry.
-const bundle = new Deno.Command(Deno.execPath(), {
-  args: [
-    "bundle",
-    "--platform",
-    "browser",
-    "--minify",
-    join(webDir, "entry.ts"),
-    "-o",
-    join(distDir, "entry.js"),
-  ],
-  cwd: root,
-  stdout: "inherit",
-  stderr: "inherit",
-});
-const bundleResult = await bundle.output();
-if (!bundleResult.success) {
-  console.error("deno bundle failed");
-  Deno.exit(1);
+// Bundle the browser entries.
+for (const entry of ["entry", "bench"]) {
+  const bundle = new Deno.Command(Deno.execPath(), {
+    args: [
+      "bundle",
+      "--platform",
+      "browser",
+      "--minify",
+      join(webDir, `${entry}.ts`),
+      "-o",
+      join(distDir, `${entry}.js`),
+    ],
+    cwd: root,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const bundleResult = await bundle.output();
+  if (!bundleResult.success) {
+    console.error(`deno bundle ${entry}.ts failed`);
+    Deno.exit(1);
+  }
 }
 
 // HTML pages.
-for (const html of ["index.html", "dioxus.html", "dominator.html"]) {
+for (
+  const html of ["index.html", "dioxus.html", "dominator.html", "bench.html"]
+) {
   await copy(join(webDir, html), join(distDir, html), { overwrite: true });
 }
 

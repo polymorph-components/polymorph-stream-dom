@@ -145,6 +145,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dioxus-bench"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "stream-dom-dioxus",
+]
+
+[[package]]
 name = "dioxus-config-macros"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

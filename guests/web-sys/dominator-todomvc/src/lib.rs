@@ -7,12 +7,18 @@
 //! 1. **No persistence.** `App::deserialize` is `App::new` and `serialize`
 //!    is a no-op: `localStorage` is the host page's, and the protocol has
 //!    no op for it. `serde` goes with it.
-//! 2. **No URL routing.** `Route` is a plain `Mutable<Route>` the filter
-//!    links set directly, instead of being derived from
-//!    `dominator::routing::url()`. A producer has no `Location` and no
-//!    `History` (see `stream_dom_fakedom::protocol`, which refuses both);
-//!    routing belongs to whatever owns the address bar, which is the
-//!    receiver.
+//! 2. **Routing is hash links plus a window listener**, not
+//!    `dominator::routing`. The filter links are ordinary
+//!    `<a href="#/active">` with no click handlers -- the browser changes
+//!    the hash -- and the app follows via a `hashchange` listener on
+//!    `window`, registered through dominator's own `global_event` and
+//!    carried by the protocol as a `Global(WINDOW)` listener target.
+//!    `dominator::routing` itself is out because it reads `location.href`
+//!    and writes `history.pushState`, neither of which a producer has (see
+//!    `stream_dom_fakedom::protocol`, which refuses both): the address bar
+//!    belongs to the receiver. One consequence is recorded in `app.rs` --
+//!    the initial route is always `All`, because there is no read for the
+//!    URL at startup, and the first `hashchange` corrects it.
 //! 3. **Mount.** `dominator::append_dom` onto the protocol's mount root
 //!    (node id 0) instead of `dominator::get_id("app")`. That is spelled
 //!    with dominator's own `body()`, because the fake `document.body` *is*

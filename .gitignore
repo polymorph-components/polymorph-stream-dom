@@ -6,3 +6,5 @@ dist/
 .playwright/
 test-results/
 playwright-report/
+bench/results/
+bench/tachometer.json
