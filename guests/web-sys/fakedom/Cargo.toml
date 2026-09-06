@@ -1,0 +1,45 @@
+# The shadow DOM the real `web_sys` drives through the `JsObject` protocol,
+# and the `polymorph:stream-dom` producer driver that turns its mutations
+# into `Frame`s.
+[package]
+name = "stream-dom-fakedom"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wasm-bindgen = { path = "../shims/wasm-bindgen" }
+stream-dom-guest = { path = "../../../crates/stream-dom-guest" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Same pin and features as the root workspace: the async runtime state is
+# shared with `stream-dom-guest`, so the versions must unify.
+wit-bindgen = { version = "=0.60.0", features = ["async-spawn", "inter-task-wakeup"] }
+
+[dev-dependencies]
+prost = { version = "0.14", default-features = false, features = ["derive"] }
+# The acceptance test drives the fake DOM through the *real* `web_sys`,
+# which reaches it through the `JsObject` protocol in `src/protocol.rs`.
+# A dev-dependency only: nothing in the library knows `web_sys` exists.
+web-sys = { version = "0.3", features = [
+  "CssRule",
+  "CssRuleList",
+  "CssStyleDeclaration",
+  "CssStyleRule",
+  "CssStyleSheet",
+  "Document",
+  "DomTokenList",
+  "Element",
+  "Event",
+  "EventTarget",
+  "HtmlElement",
+  "HtmlHeadElement",
+  "HtmlInputElement",
+  "HtmlStyleElement",
+  "KeyboardEvent",
+  "Node",
+  "StyleSheet",
+  "Text",
+  "Window",
+] }

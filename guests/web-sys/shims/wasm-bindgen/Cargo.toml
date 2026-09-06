@@ -1,0 +1,25 @@
+# A hand-written stand-in for `wasm-bindgen`, backed by real Rust values
+# instead of a JS heap. Version `0.2.128` so it satisfies dominator's
+# `0.2.48` and gloo-events' requirement through the workspace
+# `[patch.crates-io]`.
+#
+# `#[wasm_bindgen]` itself is a fake too, and lives in
+# `../wasm-bindgen-macro`; it is re-exported from this crate's root and
+# prelude, which is the only way anything reaches it.
+[package]
+name = "wasm-bindgen"
+version = "0.2.128"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wasm-bindgen-macro = { path = "../wasm-bindgen-macro" }
+
+[features]
+# dominator's default feature is `wasm-bindgen/enable-interning`. Interning
+# is a no-op here (see `intern`), but the feature name must exist.
+# `uuid` writes `wasm-bindgen?/std`; the feature has to exist.
+std = []
+enable-interning = []
+default = ["std"]

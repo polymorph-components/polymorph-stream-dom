@@ -10,7 +10,7 @@ members = [
 # js-sys, web-sys and wasm-bindgen-futures with the fake-DOM shims, and a
 # patch applies workspace-wide. Dioxus's graph pulls the real wasm-bindgen
 # (via subsecond) as dead code, which must not see the shims.
-exclude = ["guests/dominator"]
+exclude = ["guests/web-sys"]
 
 [workspace.package]
 edition = "2021"

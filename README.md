@@ -32,8 +32,10 @@ model can carry — the stream, the event export, the query imports, the
 `dom-event` resource (`wasm-tools component wit wit/` parses it).
 
 Layout: `crates/` (proto types, the shared guest crate, the Dioxus
-adapter), `guests/dioxus` and `guests/dominator` (the demo components; the
-latter is its own cargo workspace because it `[patch]`es wasm-bindgen),
+adapter), `guests/dioxus` and `guests/web-sys` (the demo components; the
+latter is its own cargo workspace because it `[patch]`es `wasm-bindgen`
+with a fake whose `#[wasm_bindgen]` macro lets the real `web-sys` drive a
+Rust shadow DOM — Dominator's TodoMVC runs unmodified),
 `receiver/` (TypeScript receiver + polyengine host glue), `web/` (demo
 site and browser test). `just --list` for the build and test recipes.
 

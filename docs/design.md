@@ -588,7 +588,7 @@ seam to *stop* touching it; the question is "can I intercept `document`."
 | Compose HTML (Kotlin) | snapshot state + slot table | Compose runtime `Applier` (`insertTopDown`/`insertBottomUp`/`remove`/`move`/`clear`) | direct; the best-designed seam on the list, the runtime already speaks tree edits. Under-invested upstream in favor of canvas Compose |
 | Dioxus | VDOM | `WriteMutations` trait | direct; resolve stack ops producer-side |
 | Reflex-DOM (Haskell) | FRP | `DomBuilder` typeclass | direct; niche |
-| Dominator, Silkenweb, MoonZoon (Rust); Laminar (Scala.js); Deku (PureScript) | fine-grained / FRP | none — `web_sys` / `dom` direct | recording fake `web_sys` layer; viable because bound output reads little back |
+| Dominator, Silkenweb, MoonZoon (Rust); Laminar (Scala.js); Deku (PureScript) | fine-grained / FRP | none — `web_sys` / `dom` direct | fake `wasm-bindgen` (macro + object protocol) under the real `web_sys`, over a recording shadow DOM; viable because bound output reads little back |
 | Yew, Sauron (Rust); Vugu, go-app, Vecty (Go); Elm; Miso; Halogen; Tokamak | VDOM | none | fake DOM layer, per language |
 
 ### JS producers
@@ -839,9 +839,10 @@ The first implementation: two producers as wasm components on polyengine
 end by a browser test. Layout: `crates/stream-dom-proto` (prost types from
 the `.proto` files), `crates/stream-dom-guest` (frame encoder, interner, id
 allocator, the outgoing stream, WIT bindings), `crates/stream-dom-dioxus`
-(Dioxus `WriteMutations` adapter), `guests/dominator` (a separate cargo
-workspace: fake `wasm-bindgen`/`js-sys`/`web-sys`/`wasm-bindgen-futures`
-over a Rust shadow DOM, so Dominator runs unmodified), `receiver/` (TS:
+(Dioxus `WriteMutations` adapter), `guests/web-sys` (a separate cargo
+workspace: fake `wasm-bindgen`/`js-sys`/`wasm-bindgen-futures` plus a fake
+`#[wasm_bindgen]` proc macro, under which the real `web-sys` drives a Rust
+shadow DOM, so Dominator runs unmodified), `receiver/` (TS:
 frames → remote-dom records → `DOMRemoteReceiver`, plus polyengine host
 glue), `web/` (the demo site). What it established, and what it argues
 against the record above:
@@ -898,21 +899,47 @@ is the "whatever flushed in this microtask" boundary predicted under
 
 **The fake-`web_sys` strategy holds for a fine-grained framework, with a
 measured surface.** Dominator's TodoMVC needs 40 `web_sys` types and about
-110 methods; roughly 35 of those must panic in the shim (every layout
-read, `Storage`, `Location`, `History`, `requestAnimationFrame`,
+110 methods; roughly 35 of those cannot be honoured by a producer (every
+layout read, `Storage`, `Location`, `History`, `requestAnimationFrame`,
 `matchMedia`). The structural subset — create/insert/remove, attribute,
 property, `classList`, `style`, listeners — is small, as predicted. The
 unbudgeted cost was the CSSOM: Dominator's `class!` builds a `<style>` in
-`<head>` and drives `insertRule`, so the shim models a stylesheet and
-returns the mount root for `document.head`. No proc macro was needed
-because Dominator's graph has no `#[wasm_bindgen]` extern blocks. Leptos
-is not reachable this way: `leptos` depends on `server_fn` → `gloo-net` →
-`wasm-streams`, all with extern blocks, so a hand-written fake `web-sys`
-cannot compile it. The route that would is a fake `wasm-bindgen` whose
-macro turns extern blocks into dynamic dispatch by `js_name` over a
-Rust-side object runtime, letting the real `web-sys`/`js-sys` compile
-unmodified; recorded, not built. Question 8's answer is therefore Dominator
-(fine-grained) plus Dioxus (diffing), not Leptos.
+`<head>` and drives `insertRule`, so the shadow DOM models a stylesheet
+and returns the mount root for `document.head`.
+
+The first cut faked `web-sys` by hand (1,100 lines of static methods,
+pinned to one web-sys release); it worked only because Dominator's graph
+has no `#[wasm_bindgen]` extern blocks. The second cut fakes the *macro*
+instead: a `#[wasm_bindgen]` proc macro rewrites `extern "C"` blocks into
+dynamic dispatch — `get`/`set`/`invoke` keyed by the binding's verbatim
+`js_name` — over a small object protocol, and the real `web-sys` 0.3.105
+compiles unmodified. web-sys's generated code uses 16 attribute keys
+(`js_class`, `js_name`, `getter`, `setter`, `catch`, `method`,
+`constructor`, `extends`, plus eight that are ignorable or rare); the
+macro is ~750 lines and the shadow DOM's dispatch table ~750, so for one
+framework the trade is a wash in code, and the versioning changes kind:
+the fake `wasm-bindgen` must declare web-sys's exact pin (`=0.2.128`),
+so the coupling is a manifest line rather than hand-copied signatures.
+What is lost is that a framework's *missing* surface used to be a compile
+error; under the macro everything compiles and a gap is a runtime panic
+naming the class and member — so a native test that mounts the real app
+is not optional. Reusing `wasm-bindgen-macro-support` was considered and
+rejected: its parser and AST are private in every release and `expand`
+fuses parsing with the real ABI codegen, so the reusable part would have
+been a fork larger than the replacement.
+
+The unsupported members now split by the DOM's own fallibility: where the
+web-sys binding is `catch` (`localStorage`, `history`, `matchMedia`,
+`requestAnimationFrame`, `innerWidth`, `attachShadow`) the producer
+returns a `SecurityError`/`NotSupportedError`, so a framework's existing
+locked-down-browser paths apply; sync getters with no exception path
+(layout reads, `location`) still panic. Leptos is reachable in principle
+this way (`leptos` → `server_fn` → `gloo-net` → `wasm-streams` all have
+extern blocks) but is not cheap: those crates also use `inline_js`/
+`module` blocks and `JsFuture`, none of which the macro supports —
+deliberately, so a first Leptos attempt fails at compile time at the
+exact items that need decisions. Question 8's answer therefore stays
+Dominator (fine-grained) plus Dioxus (diffing).
 
 **The producer's attribute-vs-property table has to include the
 framework's coercions, not just its name list.** Dioxus renders

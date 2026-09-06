@@ -1,0 +1,54 @@
+# The workspace for `web_sys`-based guests: its own cargo workspace.
+#
+# Separate from the root workspace because `[patch.crates-io]` applies
+# workspace-wide and this one replaces wasm-bindgen, js-sys and
+# wasm-bindgen-futures with fakes. The Dioxus guest in the root workspace
+# pulls the *real* wasm-bindgen (via subsecond, as dead code) and must not
+# see them. Root Cargo.toml `exclude`s this directory.
+#
+# The strategy under test (docs/design.md "Producer seams" -> "Wasm-native
+# producers", the Dominator row): a framework that talks to `web_sys`
+# directly runs unmodified as a wasm component. `web_sys` itself is the
+# *real* crates.io crate -- what is faked is everything underneath it:
+# `wasm-bindgen` (JsValue as a plain Rust value plus the `JsObject`
+# dispatch protocol), the `#[wasm_bindgen]` proc macro that rewrites
+# web-sys's `extern "C"` blocks onto that protocol, `js-sys`, and
+# `fakedom/`, the Rust-side shadow DOM that implements the objects.
+# `dominator-todomvc/` is the app driving it all.
+
+[workspace]
+resolver = "2"
+members = [
+  "shims/wasm-bindgen",
+  "shims/js-sys",
+  "shims/wasm-bindgen-macro",
+  "shims/wasm-bindgen-futures",
+  "fakedom",
+  "dominator-todomvc",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# The whole point: every `wasm-bindgen` / `js-sys` / `wasm-bindgen-futures`
+# dependency anywhere in the graph (dominator, gloo-events, the real
+# `web-sys`, the todomvc port) resolves to the shim. `cargo tree -i
+# wasm-bindgen` is the gate that proves the registry crate never appears --
+# and `cargo tree -i web-sys` the gate that proves web-sys is *not* patched.
+# `wasm-bindgen-macro` needs no patch entry: nothing depends on it by name,
+# it is reached only through `wasm_bindgen::wasm_bindgen`.
+[patch.crates-io]
+wasm-bindgen = { path = "shims/wasm-bindgen" }
+js-sys = { path = "shims/js-sys" }
+wasm-bindgen-futures = { path = "shims/wasm-bindgen-futures" }
+
+# Copied from the root manifest: the component build wants the same
+# codegen settings on both guests.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
