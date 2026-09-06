@@ -1,0 +1,308 @@
+// polymorph:stream-dom — event payloads.
+//
+// DRAFT. The payload of `handle-event`: one `EventPayload` per call, not a
+// stream (proto/stream-dom.proto is the mutation stream; docs/design.md
+// records the reasons). The receiver chooses the family by event name and
+// snapshots the fields; a family carries what handlers commonly read and
+// nothing that is only reachable through a live object. No case set is the
+// empty payload — focus, selection, toggle, clipboard, media, cancel,
+// `load` / `error` on media elements, and synthetic `mounted`: the event
+// name, which the guest gets alongside the bytes, already says everything
+// those carry.
+//
+// Field sets follow the DOM interfaces (MDN / WebIDL) and were checked
+// against what dioxus-html 0.7's `Has*Data` traits read, since that is the
+// first producer to port. Two things that adapter needs are deliberately
+// not here because they are live objects, not snapshots: the files of a
+// form control or drop, and a drag's `DataTransfer`. Those are WIT
+// resources. Consequently drag events use the `mouse` family — a drag
+// event is a MouseEvent plus that resource.
+//
+// Scalar types follow WebIDL: `long` is sint32, `float` is float, `double`
+// is double. Coordinates are CSS pixels. Times are milliseconds since the
+// Unix epoch as a double: a producer has a wall clock and no
+// `performance.timeOrigin`, so a document-relative DOMHighResTimeStamp
+// would be a number it cannot relate to anything; the receiver adds the
+// origin before sending.
+
+syntax = "proto3";
+
+package polymorph.stream_dom;
+
+// Keyboard modifiers held during the event: the DOM's altKey / ctrlKey /
+// metaKey / shiftKey. Absent means none held.
+message Modifiers {
+  bool alt = 1;
+  bool ctrl = 2;
+  bool meta = 3;
+  bool shift = 4;
+}
+
+// MouseEvent.button. Note the order differs from the `buttons` bits:
+// auxiliary (middle) is 1 here and the 4 bit there. Proto3 enums are open,
+// so a device's higher-numbered buttons arrive as their raw code.
+enum MouseButton {
+  PRIMARY = 0;
+  AUXILIARY = 1;
+  SECONDARY = 2;
+  BACK = 3;
+  FORWARD = 4;
+}
+
+// MouseEvent. Also the base of pointer, wheel and drag events.
+message MouseData {
+  // Viewport-relative (clientX/Y).
+  double client_x = 1;
+  double client_y = 2;
+  // Document-relative (pageX/Y).
+  double page_x = 3;
+  double page_y = 4;
+  // Physical screen (screenX/Y).
+  double screen_x = 5;
+  double screen_y = 6;
+  // Relative to the target's padding edge (offsetX/Y).
+  double offset_x = 7;
+  double offset_y = 8;
+  // The button that changed state. Set only on events a press or release
+  // caused (mousedown, mouseup, click, dblclick, auxclick, contextmenu and
+  // their pointer / drag counterparts); the DOM reports a meaningless 0 on
+  // mousemove and the enter / leave / over / out family, so it is absent
+  // there rather than misreported as PRIMARY.
+  optional MouseButton button = 9;
+  // Buttons currently held (the bits of MouseEvent.buttons).
+  bool primary = 10;
+  bool secondary = 11;
+  bool auxiliary = 12;
+  bool back = 13;
+  bool forward = 14;
+  Modifiers modifiers = 15;
+  // relatedTarget as a node id (mouseover / out, mouseenter / leave);
+  // absent when there is none or it is outside the mount.
+  optional uint32 related_target = 16;
+}
+
+// PointerEvent: a MouseEvent plus the device geometry.
+message PointerData {
+  MouseData mouse = 1;
+  sint32 pointer_id = 2;
+  // Contact geometry in CSS pixels (width / height); 1x1 for a mouse.
+  double width = 3;
+  double height = 4;
+  // 0..1; 0.5 for hardware without pressure while a button is held.
+  float pressure = 5;
+  // -1..1.
+  float tangential_pressure = 6;
+  // Degrees, -90..90.
+  sint32 tilt_x = 7;
+  sint32 tilt_y = 8;
+  // Degrees, 0..359.
+  sint32 twist = 9;
+  // "mouse", "pen", "touch", "" when unknown; the DOM allows further
+  // vendor-prefixed values, so this is not an enum.
+  string pointer_type = 10;
+  bool is_primary = 11;
+}
+
+// WheelEvent.deltaMode: the unit of the deltas.
+enum DeltaMode {
+  PIXEL = 0;
+  LINE = 1;
+  PAGE = 2;
+}
+
+// WheelEvent: a MouseEvent plus the scroll deltas.
+message WheelData {
+  MouseData mouse = 1;
+  double delta_x = 2;
+  double delta_y = 3;
+  double delta_z = 4;
+  DeltaMode delta_mode = 5;
+}
+
+// KeyboardEvent.location.
+enum KeyLocation {
+  STANDARD = 0;
+  LEFT = 1;
+  RIGHT = 2;
+  NUMPAD = 3;
+}
+
+// KeyboardEvent.
+message KeyboardData {
+  // The logical key ("a", "Enter", "ArrowLeft"); layout-dependent.
+  string key = 1;
+  // The physical key ("KeyA", "Enter"); layout-independent.
+  string code = 2;
+  KeyLocation location = 3;
+  bool repeat = 4;
+  // The key was part of an IME composition.
+  bool is_composing = 5;
+  Modifiers modifiers = 6;
+}
+
+// One form entry. The whole form's entries are a list, not a map: order
+// matters and names repeat (checkbox groups, multi-select).
+message FormField {
+  string name = 1;
+  string value = 2;
+}
+
+// input / change / submit and kin. Files chosen in an `<input type=file>`
+// are not here; they are a WIT resource.
+message FormData {
+  // The target control's current value (input, textarea, select); "" when
+  // the target has none.
+  string value = 1;
+  // Set for checkable controls (checkbox, radio).
+  optional bool checked = 2;
+  // The enclosing form's entries (FormData(form).entries()), populated on
+  // submit; empty otherwise. dioxus-web populates them on every event
+  // inside a form, which serializes the whole form per keystroke — a
+  // Dioxus adapter wanting that reads the controls it needs instead.
+  repeated FormField fields = 3;
+}
+
+// The target's scroll state at the time of a `scroll` event. The offsets
+// are fractional; the sizes are integer in the DOM.
+message ScrollData {
+  double scroll_top = 1;
+  double scroll_left = 2;
+  sint32 scroll_width = 3;
+  sint32 scroll_height = 4;
+  sint32 client_width = 5;
+  sint32 client_height = 6;
+}
+
+// CompositionEvent (compositionstart / update / end).
+message CompositionData {
+  // The text the IME contributed (CompositionEvent.data). "" is legitimate:
+  // a composition can be cancelled to nothing.
+  string data = 1;
+}
+
+// AnimationEvent.
+message AnimationData {
+  // Which @keyframes animation fired (animationName).
+  string animation_name = 1;
+  // The pseudo-element it ran on ("::before"), "" for the element itself.
+  string pseudo_element = 2;
+  // Seconds the animation had run when the event fired, excluding paused
+  // time.
+  double elapsed_time = 3;
+}
+
+// TransitionEvent. One `transitionend` fires per transitioned property.
+message TransitionData {
+  string property_name = 1;
+  string pseudo_element = 2;
+  double elapsed_time = 3;
+}
+
+// One finger: the DOM Touch object.
+message TouchPoint {
+  // Stable for the life of one contact, so a handler can follow a finger
+  // across touchmove events.
+  sint32 identifier = 1;
+  double client_x = 2;
+  double client_y = 3;
+  double page_x = 4;
+  double page_y = 5;
+  double screen_x = 6;
+  double screen_y = 7;
+  // Half-axes of the ellipse approximating the contact area; 0 on hardware
+  // that does not report contact geometry.
+  double radius_x = 8;
+  double radius_y = 9;
+  // Degrees, 0..90, that the contact ellipse is rotated by.
+  double rotation_angle = 10;
+  // Contact pressure, 0..1; 0 when unsupported.
+  double force = 11;
+}
+
+// TouchEvent. The three lists are the DOM's; a finger commonly appears in
+// more than one.
+message TouchData {
+  // Every finger currently on the surface (touches).
+  repeated TouchPoint touches = 1;
+  // Only the fingers whose state this event reports (changedTouches) — on
+  // touchend, the ones that lifted.
+  repeated TouchPoint changed_touches = 2;
+  // The subset of `touches` that started on the target (targetTouches).
+  repeated TouchPoint target_touches = 3;
+  Modifiers modifiers = 4;
+}
+
+// Geometry for the observer families. Structurally the same as the WIT
+// `queries` records: those are typed RPC results and these are wire
+// snapshots, and neither side can use the other's definition.
+message Size {
+  double width = 1;
+  double height = 2;
+}
+
+message Rect {
+  double x = 1;
+  double y = 2;
+  double width = 3;
+  double height = 4;
+}
+
+// Synthetic `resize`: one ResizeObserverEntry for the listening element.
+// The DOM reports both boxes writing-mode-relative (blockSize /
+// inlineSize); the receiver resolves that to width / height so the
+// producer need not know the element's writing mode.
+message ResizeData {
+  // Content plus padding plus border (borderBoxSize).
+  Size border_box = 1;
+  // The content box alone (contentBoxSize).
+  Size content_box = 2;
+}
+
+// Synthetic `visible`: one IntersectionObserverEntry for the listening
+// element.
+message VisibleData {
+  // The target's own box at the time of observation (boundingClientRect).
+  Rect bounding_client_rect = 1;
+  // How much of the target is visible, 0..1 (intersectionRatio).
+  double intersection_ratio = 2;
+  // The visible part of the target (intersectionRect); all-zero when none.
+  Rect intersection_rect = 3;
+  // Whether the target intersects the root at all (isIntersecting).
+  // Distinct from a nonzero ratio: an entry fires on the transition out of
+  // view too.
+  bool is_intersecting = 4;
+  // The root's clipping box (rootBounds). Absent when the DOM reports null:
+  // the root is the implicit viewport and the document is in a cross-origin
+  // frame, so the browser withholds the parent's geometry.
+  optional Rect root_bounds = 5;
+  // See the file header for the clock. The DOM's `time` is
+  // document-relative; the receiver adds `performance.timeOrigin`.
+  double time_ms = 6;
+}
+
+// Synthetic `frame`: the receiver's requestAnimationFrame fired. Subscribed
+// on the mount root; tells an animating producer that the last commit
+// reached the screen and the next one is due.
+message FrameData {
+  // The frame's start time, on the same clock as VisibleData.time_ms.
+  double time_ms = 1;
+}
+
+// Families ordered roughly by frequency; all tags are one byte.
+message EventPayload {
+  oneof family {
+    MouseData mouse = 1;
+    KeyboardData keyboard = 2;
+    FormData form = 3;
+    PointerData pointer = 4;
+    WheelData wheel = 5;
+    TouchData touch = 6;
+    ScrollData scroll = 7;
+    FrameData frame = 8;
+    CompositionData composition = 9;
+    AnimationData animation = 10;
+    TransitionData transition = 11;
+    ResizeData resize = 12;
+    VisibleData visible = 13;
+  }
+}

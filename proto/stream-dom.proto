@@ -1,9 +1,11 @@
-// polymorph:stream-dom — wire schema.
+// polymorph:stream-dom — wire schema of the mutation stream.
 //
-// DRAFT. Normative for every byte on the mutation stream and in event
-// payloads; docs/design.md records the reasons. WIT (wit/stream-dom.wit)
-// carries only what the component model must: functions, resources, the
-// stream itself. No data type is defined in both places.
+// DRAFT. Normative for every byte on the mutation stream; event payloads
+// are proto/stream-dom-events.proto, and docs/design.md records the
+// reasons. WIT (wit/stream-dom.wit) carries only what the component model
+// must: functions, resources, the stream itself. No data type is defined
+// in both places, except that the observer payloads carry a `Rect` / `Size`
+// structurally equal to the `queries` records.
 //
 // Stream layout: standard length-delimited messages — varint byte length,
 // then one Frame, repeated. No header. Additive change (new oneof cases,
@@ -118,22 +120,17 @@ message SetAttribute {
   optional string value = 4;
 }
 
-// A typed property value.
-message Value {
-  oneof kind {
-    string text = 1;
-    sint64 int = 2;
-    double float = 3;
-    bool boolean = 4;
-  }
-}
-
-// Set a DOM property (`value`, `checked`, `innerHTML`, ...). No `value`
-// deletes / sets undefined.
+// Set a DOM property (`value`, `checked`, `innerHTML`, ...) to a typed
+// value. No `value` case set deletes / sets undefined.
 message SetProperty {
   uint32 id = 1;
   uint32 name = 2;
-  optional Value value = 3;
+  oneof value {
+    string text = 3;
+    sint64 int = 4;
+    double float = 5;
+    bool boolean = 6;
+  }
 }
 
 // Listener registration.
@@ -235,49 +232,4 @@ message BindPath {
 message BindMarker {
   uint32 key = 1;
   uint32 id = 2;
-}
-
-// --- Events ---
-//
-// The payload of handle-event, a typed snapshot whose family the receiver
-// chooses by event name. The set and contents follow polyengine-dioxus's
-// and are to be ported — only enough is sketched here to fix the shape.
-// No case set is the empty payload (e.g. synthetic `mounted`).
-
-message MouseData {
-  double client_x = 1;
-  double client_y = 2;
-  uint32 buttons = 3;
-  uint32 modifiers = 4;
-  optional uint32 related_target = 5;
-}
-
-message KeyboardData {
-  string key = 1;
-  string code = 2;
-  uint32 modifiers = 3;
-  bool repeat = 4;
-}
-
-// The target control's current value, and the whole form's values on
-// `submit`. Fields are a list, not a map: order matters and names repeat
-// (checkbox groups, multi-select).
-message FormField {
-  string name = 1;
-  string value = 2;
-}
-
-message FormData {
-  string value = 1;
-  repeated FormField fields = 2;
-}
-
-message EventPayload {
-  oneof family {
-    MouseData mouse = 1;
-    KeyboardData keyboard = 2;
-    FormData form = 3;
-    // pointer, wheel, drag, touch, scroll, composition, animation,
-    // transition, image, resize, visible, frame: to be ported.
-  }
 }

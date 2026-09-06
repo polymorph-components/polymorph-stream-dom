@@ -2,9 +2,11 @@
 ///
 /// DRAFT. This file is the component-model half of the protocol: the
 /// functions, resources and stream that only WIT can express. Every byte
-/// on the stream and in event payloads is defined by proto/stream-dom.proto
-/// (length-delimited `Frame` messages; `EventPayload`). No data type is
-/// defined in both places. docs/design.md records the reasons.
+/// on the stream is defined by proto/stream-dom.proto (length-delimited
+/// `Frame` messages) and every event payload by
+/// proto/stream-dom-events.proto (`EventPayload`). No data type is defined
+/// in both places, except `rect` / `size`, which observer payloads also
+/// carry. docs/design.md records the reasons.
 ///
 /// A producer (any renderer) writes frames to a `stream<u8>`; a receiver
 /// (something owning a DOM) applies them. Transformers may sit between

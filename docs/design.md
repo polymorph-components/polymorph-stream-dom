@@ -3,8 +3,9 @@
 Status: design stage. Nothing here is implemented. This document records
 decisions and their reasons so that later work argues with the reasons
 rather than re-deriving them; it is not a specification. The schema is
-drafted in two files by layer: `proto/stream-dom.proto` for every byte on
-the wire, `wit/stream-dom.wit` for what only the component model carries.
+drafted in three files by layer: `proto/stream-dom.proto` for every byte on
+the mutation stream, `proto/stream-dom-events.proto` for event payloads,
+`wit/stream-dom.wit` for what only the component model carries.
 
 ## Purpose
 
@@ -485,8 +486,22 @@ receiver to say when the last commit reached the screen and the next one
 is due. Subscribed on the mount root like any listener, so a producer
 that is not animating pays nothing. `mounted` is synthetic too: fired once
 per registered element after the batch that created it is fully applied.
-(Families and synthetics borrowed from polyengine-dioxus, `frame` added;
-contents to be ported.)
+Families and synthetics are borrowed from polyengine-dioxus with `frame`
+added; field sets follow the DOM interfaces and were checked against what
+dioxus-html's `Has*Data` traits read. Two of its families fold away: drag
+events are the `mouse` family, since their only addition is the
+`DataTransfer` resource; `load` / `error` carry nothing, since the event
+name already distinguishes them. Timestamps in payloads are epoch
+milliseconds: a producer has a wall clock but no `performance.timeOrigin`,
+so a document-relative `DOMHighResTimeStamp` would be a number it cannot
+relate to anything.
+
+Files and `DataTransfer` are resources, not copies, and are not yet
+declared in the WIT: `handle-event` has no way to hand them over. The
+likely shape is methods on `dom-event` (`files() -> list<own<file>>`,
+`data-transfer() -> option<own<data-transfer>>`), called in the handler's
+synchronous prefix; polyengine-dioxus's `file` and `data-transfer`
+resources are the model. Open.
 
 `queries` keep typed WIT signatures: they are RPC with small fixed return
 shapes (`rect`, `point`, `size`), typing the call is free in-process, and
