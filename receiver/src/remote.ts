@@ -40,7 +40,12 @@ import { validateTemplateArena } from "./templates.ts";
  * (remote id) at creation; the producer's node id only ever maps IN to a
  * shadow node (`RemoteDomTranscoder`'s `#byProducerId`), never the other
  * way, since several producer ids can share no shadow node but a shadow
- * node has exactly one rid. */
+ * node has exactly one rid. `ids` is the reverse of that map's entries
+ * FOR THIS NODE — usually one id, but `bind-path` can alias a second (or
+ * more) producer id onto the same interior template node — so that
+ * `remove` can forget a whole subtree's ids in O(subtree size) by walking
+ * `children`/`ids` directly, instead of scanning every entry in
+ * `#byProducerId` per removed node (see `#forgetSubtree`). */
 interface ShadowNode {
   rid: string;
   kind: "element" | "text" | "comment";
@@ -52,6 +57,7 @@ interface ShadowNode {
   parent: ShadowNode | null;
   children: ShadowNode[];
   attached: boolean;
+  ids: number[];
 }
 
 /** A registered template: the flat arena plus its declared root indices,
@@ -74,6 +80,7 @@ function rootShadow(): ShadowNode {
     parent: null,
     children: [],
     attached: true,
+    ids: [],
   };
 }
 
@@ -129,8 +136,18 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
   ) {
     this.#connection = connection;
     this.#domReceiver = domReceiver;
-    const root = rootShadow();
-    this.#byProducerId.set(0, root);
+    this.#bind(0, rootShadow());
+  }
+
+  /** Register `id -> node` in `#byProducerId` AND record `id` on the node
+   * itself (`ShadowNode.ids`), so `#forgetSubtree` can undo exactly this
+   * later without scanning the whole map. Every place that binds a
+   * producer id to a shadow node goes through this — `createElement`/
+   * `createText`/`createPlaceholder`, `cloneTemplate`'s root, and
+   * `bindPath` (which aliases a second id onto an already-bound node). */
+  #bind(id: number, node: ShadowNode): void {
+    this.#byProducerId.set(id, node);
+    node.ids.push(id);
   }
 
   get sink(): FrameSink {
@@ -172,6 +189,14 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     return this.#byProducerId.get(id)?.rid;
   }
 
+  /** Total producer ids currently bound (including the mount root's `0`)
+   * — exposed for tests asserting that `remove` actually released a whole
+   * subtree's ids rather than merely detaching it (`#forgetSubtree`'s
+   * O(subtree size) fix). */
+  get idCount(): number {
+    return this.#byProducerId.size;
+  }
+
   // -- interning / creation (shadow-only; nothing to emit yet) -----------
 
   internString(id: number, s: string): void {
@@ -179,7 +204,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
   }
 
   createElement(id: number, tag: number, ns: number | undefined): void {
-    this.#byProducerId.set(id, {
+    this.#bind(id, {
       rid: this.#nextRid(),
       kind: "element",
       tag: this.#str(tag),
@@ -190,11 +215,12 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       parent: null,
       children: [],
       attached: false,
+      ids: [],
     });
   }
 
   createText(id: number, text: string): void {
-    this.#byProducerId.set(id, {
+    this.#bind(id, {
       rid: this.#nextRid(),
       kind: "text",
       tag: "",
@@ -205,11 +231,12 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       parent: null,
       children: [],
       attached: false,
+      ids: [],
     });
   }
 
   createPlaceholder(id: number): void {
-    this.#byProducerId.set(id, {
+    this.#bind(id, {
       rid: this.#nextRid(),
       kind: "comment",
       tag: "",
@@ -220,6 +247,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       parent: null,
       children: [],
       attached: false,
+      ids: [],
     });
   }
 
@@ -470,11 +498,15 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
   }
 
   /** Drop `node` and its descendants from the id map — ids are never
-   * reused (docs/design.md), so forgetting is safe. */
+   * reused (docs/design.md), so forgetting is safe. O(subtree size): each
+   * node deletes exactly its own `ids` (usually one, occasionally more via
+   * `bind-path` aliasing) instead of scanning `#byProducerId` for a
+   * reference match — the previous version was O(ids-in-map) PER removed
+   * node, i.e. O(ids × nodes) for a whole-subtree remove, which is the
+   * quadratic a 10k-row clear hit. */
   #forgetSubtree(node: ShadowNode): void {
-    for (const [pid, n] of this.#byProducerId) {
-      if (n === node) this.#byProducerId.delete(pid);
-    }
+    for (const id of node.ids) this.#byProducerId.delete(id);
+    node.ids.length = 0;
     for (const c of node.children) this.#forgetSubtree(c);
   }
 
@@ -583,6 +615,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
           parent: null,
           children: [],
           attached: false,
+          ids: [],
         };
       }
       if (n.kind === "dynamic") {
@@ -600,6 +633,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
           parent: null,
           children: [],
           attached: false,
+          ids: [],
         };
       }
       const attrs = new Map<string, string>();
@@ -615,6 +649,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
         parent: null,
         children: [],
         attached: false,
+        ids: [],
       };
       for (const childIdx of n.element.children) {
         const child = clone(childIdx);
@@ -623,7 +658,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       }
       return shadow;
     };
-    this.#byProducerId.set(id, clone(rootNodeIndex));
+    this.#bind(id, clone(rootNodeIndex));
   }
 
   bindPath(root: number, path: Uint8Array, id: number): void {
@@ -637,7 +672,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       }
       node = next;
     }
-    this.#byProducerId.set(id, node);
+    this.#bind(id, node);
   }
 
   bindMarker(_key: number, _id: number): void {

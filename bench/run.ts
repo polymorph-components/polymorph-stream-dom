@@ -75,6 +75,13 @@ const proc = new Deno.Command("npx", {
     configPath,
     "--json-file",
     tachometerJsonPath,
+    // No auto-sampling phase: after the fixed sample size tachometer
+    // would keep sampling for up to 3 minutes trying to resolve every
+    // pairwise difference to a definite winner, which a shared runner
+    // never does. The confidence intervals are the product; the verdicts
+    // are not.
+    "--timeout",
+    "0",
   ],
   stdout: "inherit",
   stderr: "inherit",
