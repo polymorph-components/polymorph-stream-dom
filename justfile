@@ -3,9 +3,11 @@
 
 default: check test
 
-# Type-check and lint every workspace (Rust: both cargo workspaces, for the
-# component target; TS: receiver + web).
-check:
+# Type-check and lint every workspace (Rust: the two component workspaces
+# for the wasm target, the native host workspace; TS: receiver + web +
+# desktop UI). Depends on desktop-ui because tauri's generate_context!
+# refuses to compile without the frontendDist directory present.
+check: desktop-ui
     cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
     cargo clippy --manifest-path guests/web-sys/Cargo.toml --workspace --target wasm32-wasip2 -- -D warnings
     cargo clippy --manifest-path host/Cargo.toml --workspace -- -D warnings
