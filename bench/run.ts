@@ -3,7 +3,9 @@
 // (dispatch: "bench" track).
 //
 //   deno run -A bench/run.ts [--sample-size N] [--filter substring]
-//     [--chrome-binary path]
+//     [--chrome-binary path] [--full]
+//
+// `--full` adds the `chunked` transport (see tachometer.ts's GenerateOptions).
 //
 // Requires `just site` first (this does not build `dist/` itself, unlike
 // `just bench`, which runs `site` before this).
@@ -20,6 +22,7 @@ interface Args {
   sampleSize?: number;
   filter?: string;
   chromeBinary?: string;
+  full?: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -30,6 +33,7 @@ function parseArgs(argv: string[]): Args {
     if (a === "--sample-size") args.sampleSize = Number(rest.shift());
     else if (a === "--filter") args.filter = rest.shift();
     else if (a === "--chrome-binary") args.chromeBinary = rest.shift();
+    else if (a === "--full") args.full = true;
     else {
       console.error(`unknown argument: ${a}`);
       Deno.exit(2);
@@ -54,6 +58,7 @@ const config = generateConfig({
   filter: args.filter,
   sampleSize: args.sampleSize,
   chromeBinary: args.chromeBinary,
+  full: args.full,
 });
 const configPath = join(benchDir, "tachometer.json");
 await Deno.writeTextFile(configPath, JSON.stringify(config, null, 2) + "\n");

@@ -4,10 +4,18 @@
 # `dist/bench/`.
 name: bench
 
+# A push to main runs the default matrix (producers x receivers x ops,
+# direct transport, 15 samples: ~10 minutes). `workflow_dispatch` with
+# `full: true` adds the chunked transport and 25 samples (~45 minutes).
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      full:
+        description: "Full matrix (chunked transport too) with 25 samples"
+        type: boolean
+        default: false
 
 concurrency:
   group: bench-${{ github.ref }}
@@ -47,7 +55,7 @@ jobs:
           node-version: "24"
       - run: just components
       - run: just site
-      - run: deno run -A bench/run.ts --sample-size 25
+      - run: deno run -A bench/run.ts ${{ inputs.full && '--full --sample-size 25' || '--sample-size 15' }}
       - uses: benchmark-action/github-action-benchmark@v1
         with:
           tool: customSmallerIsBetter
