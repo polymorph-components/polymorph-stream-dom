@@ -21,6 +21,12 @@ component. For them a typed mutation stream is the only path to a DOM,
 not an optimization. JS frameworks are the second audience: they already
 have a DOM and need an adapter to stop touching it.
 
+This gap is deliberate on the platform's side. The 2019 WebIDL Bindings /
+Interface Types proposal set out to make direct DOM calls from wasm cheap;
+it was abandoned and its remains became the component model, which binds
+no browser API at all. A mutation protocol is what is left once that road
+is closed.
+
 It is a write-side command protocol, not an observer. The web
 `MutationObserver` reports what already happened to a DOM; this stream is
 the receiver's *only* way to learn what to render. The close analogs are
@@ -103,6 +109,15 @@ producer adapter ──▶ stream<operation> ──▶ [transformers]* ──▶
   adapter (for a framework running outside any component) emulates the
   rendezvous stream — `read(n)` / `write(buf)` returning promises with the
   min-copy rule — so the conformance corpus runs unchanged against it.
+- The vocabulary has two layers. *Definitional* ops (`intern`,
+  `register-template`, `clone-template`, `bind-path`) can be compiled away
+  by a transformer into the *structural core* (`create-*`,
+  `insert-before`, `remove`, `set-*`, listeners, `commit`). The core is
+  isomorphic to a `MutationRecord` stream, so a minimal receiver is small,
+  a recorder is a `MutationObserver`, and during bring-up an
+  expand-then-encode transformer can drive an existing browser receiver
+  (Shopify remote-dom's `DOMRemoteReceiver`, rrweb's `Replayer`) before
+  a native one exists.
 
 ## Protocol decisions
 
@@ -160,14 +175,27 @@ Consequences:
 - **Tree ops are `insert-before(parent, id, anchor?)`.** Every seam bottoms
   out in `insertBefore`: react-reconciler, Vue's `createRenderer`, Solid's
   universal renderer, Angular's `Renderer2`, Preact, Dioxus (after
-  resolving its stack). `anchor = none` is append.
+  resolving its stack). `anchor = none` is append. Inserting an attached
+  node is a move; a receiver should use `Node.moveBefore()` (shipping
+  since 2025) where available, which preserves iframe state, focus,
+  selection and running animations that `insertBefore` resets. No
+  protocol change — receiver behavior.
 - **No stack machine.** Dioxus-style `push-root` / `append-children(m)` /
   path ops relative to a stack top mean nothing without replaying the
   stack; a coalescer would have to be an interpreter. Dioxus's adapter
   resolves its stack producer-side, which is trivial.
-- **Producer allocates ids** (`u32`; `0` is the mount root). Reuse after
-  `remove` is safe under stream ordering. `remove` frees the whole
-  subtree's ids; the producer knows the tree.
+- **Producer allocates ids** (`u32`; `0` is the mount root), like Wayland's
+  client-allocated object ids and for the same reason: no round trip to
+  learn a name. **Ids are never reused within a stream.** Reuse after
+  `remove` would be safe on the forward channel (stream order), but the
+  reverse channel is not ordered against it: across a worker or network,
+  `handle-event(target=7)` for a node the producer has since removed can
+  arrive after `7` was handed to a new node, and the event lands on the
+  wrong handler with no way to tell. Blazor hit exactly this and answers
+  with never-reused handler ids plus a disposal grace period. Monotonic
+  allocation makes a stale event a simple "unknown id, drop". Exhausting
+  `u32` in one session is a `reset` (open question 5), not a wrap.
+  `remove` still frees the subtree's *nodes*; the producer knows the tree.
 - **Interning definitions are never dropped** by a transformer, even when
   the op that used them was. Keeps the define-before-use invariant trivial.
 - **Ids are per stream.** A host with several producers on one page maps
@@ -271,7 +299,20 @@ No tier reliably offers a `Node` handle to the producer, so `ref.current`
 is an id. Libraries that grab DOM nodes (editors, charts, d3) do not work
 inside the producer; the escape hatch is a host-side island — a node the
 receiver hands to receiver-side code — analogous to React Native's native
-components. Shape TBD; listed under open questions.
+components.
+
+The likely shape is **no new op at all: an island is a custom element.**
+The receiver registers tags (real `customElements.define`, or a private
+tag → factory map); the producer emits ordinary `create-element(tag)`,
+`set-property` for props, `add-listener` for callbacks; the island's code
+gets the real node because it *is* receiver-side code, and
+`connectedCallback` / `disconnectedCallback` are its lifecycle. This is
+how Shopify remote-dom v2 exposes host UI to sandboxed producers, and how
+server-driven-UI systems work generally. Two things it needs from the
+protocol: a `custom` payload family carrying the `CustomEvent.detail`, and
+a structured `value` variant (JSON or a `list`/`record` tree) so props can
+be more than scalars. `innerHTML` and Selection/Range manipulation, which
+the protocol otherwise lacks on purpose, live behind the same door.
 
 ### Hydration is push, and binds by marker
 
@@ -340,9 +381,10 @@ because every framework lets the handler call it imperatively. Options:
 C is required regardless as the only thing a remote receiver can honor.
 Phoenix LiveView is the existence proof that C alone is livable: years of
 production apps on a server-side producer with nothing but declarative
-`phx-*` modifiers. Leaning A + C: A for in-process receivers, C
-everywhere. B is recorded in case A's backpressure hazard proves real in
-practice.
+`phx-*` modifiers; worker-dom, facing the same boundary, also lands on a
+receiver-side per-event-type default policy. Leaning A + C: A for
+in-process receivers, C everywhere. B is recorded in case A's backpressure
+hazard proves real in practice.
 
 ## Producer seams
 
@@ -421,10 +463,54 @@ emulated stream — for most JS frameworks the worker is the natural home,
 so the JS-native path is a first-class implementation of the protocol,
 not a shim.
 
-## Prior art that already ships a mutation stream
+## Prior art
 
-Two production systems run one mutation protocol across more than one
-boundary. Neither is VDOM-shaped on the wire.
+Nothing existing can be adopted whole: no prior system types its protocol
+as a component-model interface, puts templates on the wire as a reusable
+clone-and-bind primitive, or exposes its optimizer as a composable
+transformer. Everything else here has an existing implementation to
+compare against, and several are reusable as bring-up receivers or as
+lists of edge cases.
+
+### Closest: a DOM built elsewhere, mutations shipped to a real one
+
+**Shopify remote-dom** (ex `remote-ui`). Untrusted extension code in a
+worker or iframe builds a tree against a fake `document`; an id-addressed
+mutation stream (`insertChild`, `removeChild`, `updateText`,
+`updateProperty`) reaches a host receiver; events serialize back. In
+production in Shopify checkout extensions. If this protocol did not need
+wasm typing and templates, remote-dom's vocabulary could be used verbatim.
+Its two design choices worth copying: host UI exposed as custom elements
+(see islands), and an explicit refusal of synchronous reads.
+
+**AMP worker-dom.** Same shape, main thread ↔ worker, with a typed-array
+encoding and a string table (this design's `intern`). Its answers to the
+hard parts: reads are explicitly async (`getBoundingClientRect` returns a
+promise); `preventDefault` is a receiver-side default policy. Its stall is
+informative about the fake-DOM strategy's limits.
+
+**rrweb** (Sentry, PostHog, LogRocket, OpenReplay replay). Records a full
+DOM snapshot plus `MutationObserver`-derived deltas — `adds:
+[{parentId, nextId, node}]`, `removes`, `texts`, `attributes` — with an
+id mirror on both ends, and replays into another document. Anchor-based
+insert-before with a producer-side id mirror, at very large deployed
+scale. Its edge-case list is this protocol's to-do list: shadow roots,
+`adoptedStyleSheets` and CSSOM `insertRule`, `<canvas>`, iframes,
+`<input>` value-vs-attribute, `<textarea>` content, `<select>` selection.
+
+**Partytown** is the opposite bet — third-party scripts in a worker with
+*synchronous* DOM access faked via sync XHR to a service worker — and a
+measured demonstration of what insisting on sync reads costs.
+
+### Server-side widget trees synced to a browser
+
+A twenty-year lineage of "the real tree lives on the server": **Vaadin
+Flow** (server-side `Element` API mirroring the DOM node-for-node; a
+`StateTree` ships `put` / `splice` / `attach` / `detach` by node id over
+websocket), **Eclipse RAP** (`create` / `set` / `call` / `listen` /
+`notify` / `destroy` on id-addressed remote objects — `listen` is this
+design's subscribe-per-event), **Wt**, **ZK**, **Echo**, and lately
+**Streamlit**'s `Delta` protobuf. Then the two already discussed:
 
 **Blazor.** `RenderBatch` — an edit list plus a reference-frame table —
 is applied by the same JS interop whether the producer is in-process wasm
@@ -434,7 +520,8 @@ internals diff a render tree, but the wire is a mutation batch, and the
 2019. Its failure modes are the ones to price in for the network tier:
 Server mode's per-keystroke round trip, and per-connection ("circuit")
 state on the server that has to be held for the client's lifetime — the
-resync question here is its reconnect story.
+resync question here is its reconnect story. Its never-reused event
+handler ids are the reason this design's node ids are not reused.
 
 **Phoenix LiveView.** The wire is statics-plus-dynamics: a template's
 static parts are sent once under a fingerprint, then only changed hole
@@ -444,6 +531,38 @@ demonstrates that a network-tier producer manages without imperative
 `preventDefault` (option C alone), and that a template-hole protocol
 beats sending HTML fragments even when the client morphs HTML for other
 paths.
+
+**Hotwire Turbo Streams / Datastar / htmx out-of-band swaps** are the
+same idea at HTML-fragment granularity: `append | prepend | replace |
+update | remove | before | after` against a DOM id. Coarser, same verbs.
+
+### DOM protocols that exist as protocols
+
+**Chrome DevTools Protocol, `DOM` domain.** `nodeId` / `backendNodeId`,
+`setAttributeValue`, `removeNode`, `setOuterHTML`, and
+`childNodeInserted` / `attributeModified` events: a versioned,
+schema-described, id-addressed DOM mutation protocol, read-dominant in
+practice (Puppeteer, Playwright). Its node-id lifetime rules — ids
+invalidated on navigation, children fetched lazily by depth — are the
+reference for what a `reset` has to invalidate.
+
+**WHATWG `MutationObserver`** defines the platform's own delta shape for
+a DOM. This protocol is a command stream, not an observer, but its
+structural core is kept isomorphic to `MutationRecord` (see
+Architecture) so recording and replay are trivial.
+
+### Structural ancestors
+
+**Wayland**: client-allocated object ids, requests batched and made
+visible atomically at `wl_surface.commit`, events back on the same
+socket — the same shape as this design, chosen for the same round-trip
+reasons; X11 with server-allocated ids is the cautionary contrast.
+**React Native's old bridge** (`UIManager.createView` / `updateView` /
+`manageChildren`, batched, async) and *why Fabric replaced it* — layout
+reads and event latency across an async boundary — is the cautionary
+tale for the network tier; Blazor Server hit the same wall. **Emscripten
+`PROXY_TO_PTHREAD`** and OffscreenCanvas are the "wasm off the main
+thread queues its DOM calls" precedent inside the wasm world itself.
 
 ## Prior measurements worth knowing
 
@@ -487,14 +606,15 @@ definition.
 2. **Option A backpressure hazard.** How often is a producer instance under
    backpressure when a DOM event arrives, with a stackful scheduler? If
    "essentially never", A + C is settled.
-3. **Islands.** Shape of `mount-foreign(id, kind, props)` or equivalent;
-   who owns the node's lifecycle; how events cross back.
+3. **Islands.** Custom elements as sketched above; remaining: the
+   `custom` payload family and a structured `value` variant for props.
 4. **Coalescer window and index.** K and the key shape. Template and
    binding ops (`register-template`, `clone-template`, `bind-path`,
    `bind-marker`) are definitions, kept like `intern` unless the root they
    define under is removed inside the window.
 5. **Resync.** `reset` semantics and whether a full snapshot is a special
-   batch or the normal initial-mount batch replayed.
+   batch or the normal initial-mount batch replayed. Also the id-space
+   exhaustion path, since ids are never reused.
 6. **Byte encoding.** Whether a `stream<u8>` transformer output is needed at
    all, and if so whether its framing survives chunk boundaries cheaply.
 7. **Conformance corpus format.** Recorded op streams as the shared test
@@ -503,3 +623,14 @@ definition.
    pluggable in current releases, else Sycamore; Dioxus as the diffing
    counterpart. A fine-grained first producer exercises templates,
    `bind-path` and small-batch coalescing, which a VDOM producer would not.
+9. **Shadow DOM and CSSOM.** No `attach-shadow`, no `adoptedStyleSheets`,
+   no `insertRule`. Lit and every web-component framework need the first
+   two; rrweb and remote-dom both added shadow-root support after
+   shipping without it. Probably a shadow root as an insertable
+   pseudo-node with its own id, and a stylesheet as a registered resource.
+10. **Trust model.** The stream can create `<script>`, set `on*`
+    attributes, `javascript:` hrefs and `innerHTML`. If a producer is ever
+    third-party (a plugin), the receiver needs an allowlist — which is a
+    transformer, and remote-dom's reason for existing. Decide whether the
+    producer is trusted by definition or whether a `sanitize` transformer
+    is part of the reference set.

@@ -22,9 +22,11 @@ package polymorph:vdom@0.1.0;
 /// - An `intern` definition precedes the first use of its `str-ref` in
 ///   the same stream and is emitted once per producer instance.
 ///   Transformers never drop an `intern`.
-/// - Node ids are producer-allocated, per stream. `0` is the mount root.
-///   `remove` frees the ids of the whole removed subtree; a freed id may
-///   be reused by a later `create-*`.
+/// - Node ids are producer-allocated, per stream, and never reused. `0` is
+///   the mount root. `remove` frees the subtree's nodes, not its ids: the
+///   reverse channel (`handle-event`) is not ordered against this stream,
+///   so a reused id could deliver a stale event to the wrong node. A
+///   `handle-event` for an unknown id is dropped.
 interface mutations {
   /// Interned string slot, defined by a prior `intern` op.
   type str-ref = u16;
@@ -42,7 +44,8 @@ interface mutations {
 
   /// Insert `id` under `parent` before `anchor`; `anchor = none` appends.
   /// Moving an already-inserted node is allowed and is exactly what the
-  /// DOM's `insertBefore` does.
+  /// DOM's `insertBefore` does; receivers prefer `moveBefore` where
+  /// available so the move preserves node state.
   record insert-before { parent: node-id, id: node-id, anchor: option<node-id> }
 
   /// Set a text node's content.
