@@ -33,6 +33,13 @@ export interface TachometerBenchmark {
 
 export interface TachometerConfig {
   sampleSize?: number;
+  /** Minutes of auto-sampling after the fixed sample size. Always 0 here:
+   * tachometer would otherwise keep sampling for up to 3 minutes trying
+   * to resolve every pairwise difference to a definite winner, which a
+   * shared runner never does. The confidence intervals are the product;
+   * the verdicts are not. (A CLI `--timeout` is rejected alongside
+   * `--config`, so it lives here.) */
+  timeout: number;
   benchmarks: TachometerBenchmark[];
 }
 
@@ -85,6 +92,7 @@ export function generateConfig(opts: GenerateOptions): TachometerConfig {
   }
   return {
     ...(opts.sampleSize ? { sampleSize: opts.sampleSize } : {}),
+    timeout: 0,
     benchmarks,
   };
 }
