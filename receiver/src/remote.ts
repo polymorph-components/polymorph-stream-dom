@@ -23,14 +23,17 @@ import type {
   RemoteMutationRecord,
   RemoteNodeSerialization,
 } from "@remote-dom/core";
+import { DOMRemoteReceiver } from "@remote-dom/core/receivers";
 
 import type {
   FrameSink,
   Listener,
-  ListenerTarget,
   PropertyValue,
   TemplateNode,
 } from "./frames.ts";
+import type { Receiver } from "./receiver.ts";
+import { ListenerRegistry } from "./receiver.ts";
+import { validateTemplateArena } from "./templates.ts";
 
 /** A node in the producer's shadow tree — this transcoder's own bookkeeping,
  * independent of remote-dom's id space. Every shadow node gets a `rid`
@@ -50,16 +53,6 @@ interface ShadowNode {
   children: ShadowNode[];
   attached: boolean;
 }
-
-/** Registered listeners for one target (a node, or a global singleton),
- * keyed by the interned event-name ref (`Listener.name`) so add/remove
- * find the same entry. */
-type ListenerMap = Map<number, Listener>;
-
-/** `ListenerTarget` narrowed to its two global cases, and the key
- * `#globalListeners` uses for them — the two are not the "global" oneof
- * case number, just this class's own bookkeeping key. */
-type GlobalKind = "window" | "document";
 
 /** A registered template: the flat arena plus its declared root indices,
  * as `register-template` sent them (docs/design.md "Templates are core,
@@ -84,6 +77,14 @@ function rootShadow(): ShadowNode {
   };
 }
 
+/** Sentinel method name for the `DOMRemoteReceiver` `call` trick
+ * (`DOMRemoteReceiver`'s constructor `call` option — receivers/
+ * DOMRemoteReceiver.ts — receives the real `Element` for an id and either
+ * dispatches a method on it or, as used here, hands it straight back):
+ * asking for this "method" returns the element itself rather than
+ * invoking anything on it. Used by `resolveNode`. */
+const NODE_CALL = "__stream_dom_node";
+
 /** Turns `FrameSink` calls into `RemoteMutationRecord[]`, committed to a
  * `RemoteConnection` at `commit()`. See docs/design.md "Interop with
  * remote-dom" for the shim's job and the two acknowledged gaps
@@ -99,31 +100,55 @@ function rootShadow(): ShadowNode {
  * "Events": "bubbling events are delegated at the mount root"), so a
  * listener registered on an ancestor would never fire for a descendant's
  * event under that handler. Instead `add-listener`/`remove-listener`
- * populate a listener registry below, and `mount.ts` does real delegation
- * once nodes exist (`pendingAttach`/`pendingDetach`, resolved after
+ * populate `this.listeners` (a `ListenerRegistry`, shared with
+ * `NativeDomReceiver`), and `mount.ts` does real delegation once nodes
+ * exist (`listeners.pendingAttach`/`pendingDetach`, resolved after
  * `commit`).
+ *
+ * Constructed two ways: `createRemoteReceiver(root)` (the production path
+ * — owns a fresh `DOMRemoteReceiver` over `root`) or `new
+ * RemoteDomTranscoder(connection)` directly with a bare `RemoteConnection`
+ * (what the unit tests use: `DOMRemoteReceiver.attach()` calls
+ * `document.createElement`, unavailable under bare Deno, so tests that
+ * only care about the shadow-tree/record-emission logic supply a fake
+ * `RemoteConnection` and never touch a real `DOMRemoteReceiver`).
  */
-export class RemoteDomTranscoder implements FrameSink {
+export class RemoteDomTranscoder implements Receiver, FrameSink {
   #connection: RemoteConnection;
-  #strings = new Map<number, string>();
+  #domReceiver: DOMRemoteReceiver | null;
   #byProducerId = new Map<number, ShadowNode>();
   #templates = new Map<number, Template>();
   #ridCounter = 0;
   #records: RemoteMutationRecord[] = [];
-  #nodeListeners = new Map<number, ListenerMap>();
-  #globalListeners = new Map<GlobalKind, ListenerMap>();
-  /** Listener adds/removes captured this batch, drained by `mount.ts`'s
-   * `onCommit` hook after `commit()`'s `mutate` call (nodes only exist in
-   * the real DOM once `mutate` has run — globals need no such wait, but
-   * are queued the same way for one code path). */
-  pendingAttach: Array<{ target: ListenerTarget; listener: Listener }> = [];
-  pendingDetach: Array<{ target: ListenerTarget; listener: Listener }> = [];
-  onCommit: (() => void) | undefined;
+  readonly listeners: ListenerRegistry = new ListenerRegistry();
+  onCommit: (() => void) | null = null;
 
-  constructor(connection: RemoteConnection) {
+  constructor(
+    connection: RemoteConnection,
+    domReceiver: DOMRemoteReceiver | null = null,
+  ) {
     this.#connection = connection;
+    this.#domReceiver = domReceiver;
     const root = rootShadow();
     this.#byProducerId.set(0, root);
+  }
+
+  get sink(): FrameSink {
+    return this;
+  }
+
+  resolveNode(id: number): Node | undefined {
+    const rid = this.#byProducerId.get(id)?.rid;
+    if (rid === undefined) return undefined;
+    try {
+      return this.#connection.call(rid, NODE_CALL) as Node;
+    } catch {
+      return undefined; // Not yet attached in the real DOM.
+    }
+  }
+
+  dispose(): void {
+    this.#domReceiver?.disconnect();
   }
 
   #nextRid(): string {
@@ -137,12 +162,12 @@ export class RemoteDomTranscoder implements FrameSink {
   }
 
   #str(ref: number): string {
-    return this.#strings.get(ref) ?? "";
+    return this.listeners.stringFor(ref);
   }
 
   /** The remote id (`RemoteMutationRecord`/`DOMRemoteReceiver` id space)
-   * for a producer node id, for `mount.ts`'s `resolveNode` (looked up via
-   * the receiver's `call` option — see class doc). */
+   * for a producer node id — exposed for tests, which assert on it
+   * directly rather than reaching into the real DOM. */
   ridFor(id: number): string | undefined {
     return this.#byProducerId.get(id)?.rid;
   }
@@ -150,7 +175,7 @@ export class RemoteDomTranscoder implements FrameSink {
   // -- interning / creation (shadow-only; nothing to emit yet) -----------
 
   internString(id: number, s: string): void {
-    this.#strings.set(id, s);
+    this.listeners.internString(id, s);
   }
 
   createElement(id: number, tag: number, ns: number | undefined): void {
@@ -472,8 +497,8 @@ export class RemoteDomTranscoder implements FrameSink {
     // remote-dom has no setAttributeNS equivalent (UPDATE_PROPERTY_TYPE_ATTRIBUTE
     // -> plain `setAttribute`/`removeAttribute` in DOMRemoteReceiver.ts).
     // Applied as a plain attribute; SVG/XML-namespaced attributes will not
-    // render correctly through this bring-up receiver. Known remote-dom
-    // gap (docs/design.md open question 9 territory), not fixed here.
+    // render correctly through this receiver — use the native receiver
+    // (native.ts) for SVG.
     void ns;
     const attrName = this.#str(name);
     const node = this.#resolve(id);
@@ -514,95 +539,17 @@ export class RemoteDomTranscoder implements FrameSink {
   // -- listeners: recorded, not remote-dom properties (see class doc) -----
 
   addListener(listener: Listener): void {
-    const map = this.#listenersFor(listener.target);
-    map.set(listener.name, listener);
-    this.pendingAttach.push({ target: listener.target, listener });
+    this.listeners.add(listener);
   }
 
   removeListener(listener: Listener): void {
-    const map = this.#existingListenersFor(listener.target);
-    map?.delete(listener.name);
-    this.pendingDetach.push({ target: listener.target, listener });
-  }
-
-  #listenersFor(target: ListenerTarget): ListenerMap {
-    if (target.kind === "node") {
-      let map = this.#nodeListeners.get(target.id);
-      if (!map) {
-        map = new Map();
-        this.#nodeListeners.set(target.id, map);
-      }
-      return map;
-    }
-    let map = this.#globalListeners.get(target.kind);
-    if (!map) {
-      map = new Map();
-      this.#globalListeners.set(target.kind, map);
-    }
-    return map;
-  }
-
-  #existingListenersFor(target: ListenerTarget): ListenerMap | undefined {
-    return target.kind === "node"
-      ? this.#nodeListeners.get(target.id)
-      : this.#globalListeners.get(target.kind);
+    this.listeners.remove(listener);
   }
 
   // -- templates ------------------------------------------------------------
 
   registerTemplate(id: number, nodes: TemplateNode[], roots: number[]): void {
-    // Validate the arena before storing it: range and acyclicity, since a
-    // receiver "validates the index graph (range, acyclicity) rather than
-    // trust it" (docs/design.md "Templates are core, not an extension").
-    const referenced = new Set<number>();
-    for (const n of nodes) {
-      if (n.kind !== "element") continue;
-      for (const c of n.element.children) {
-        if (c < 0 || c >= nodes.length) {
-          throw new Error(
-            `stream-dom: template ${id} child index ${c} out of range`,
-          );
-        }
-        if (referenced.has(c)) {
-          throw new Error(
-            `stream-dom: template ${id} node ${c} referenced more than once`,
-          );
-        }
-        referenced.add(c);
-      }
-    }
-    for (const r of roots) {
-      if (r < 0 || r >= nodes.length) {
-        throw new Error(
-          `stream-dom: template ${id} root index ${r} out of range`,
-        );
-      }
-    }
-    // Acyclicity: walk from EVERY node index, not just the declared roots —
-    // a cycle in a subgraph unreachable from any root would otherwise pass
-    // validation here and then loop forever the moment anything (a future
-    // op, a bug in a later root's subtree) reaches it. `visited` is global
-    // across the whole scan so a node already found acyclic via one
-    // starting point does not get walked again from another.
-    const visiting = new Set<number>();
-    const visited = new Set<number>();
-    const visit = (idx: number): void => {
-      if (visiting.has(idx)) {
-        throw new Error(`stream-dom: template ${id} is cyclic at node ${idx}`);
-      }
-      if (visited.has(idx)) return;
-      visiting.add(idx);
-      const n = nodes[idx];
-      if (n.kind === "element") {
-        for (const c of n.element.children) {
-          visit(c);
-        }
-      }
-      visiting.delete(idx);
-      visited.add(idx);
-    };
-    for (let idx = 0; idx < nodes.length; idx++) visit(idx);
-
+    validateTemplateArena(id, nodes, roots);
     this.#templates.set(id, { nodes, roots });
   }
 
@@ -697,30 +644,6 @@ export class RemoteDomTranscoder implements FrameSink {
     throw new Error("hydration is not supported by this receiver");
   }
 
-  /** The interned string for a `str-ref`, for `mount.ts`'s delegation
-   * bookkeeping (native DOM listener names, which are strings, keyed by
-   * the same interned refs `Listener.name` carries). */
-  stringFor(ref: number): string {
-    return this.#str(ref);
-  }
-
-  /** The reverse of `internString`: the ref a string was interned under,
-   * for resolving a native event name back to the ref a `Listener`
-   * registered with (`mount.ts`'s delegated dispatch). A linear scan —
-   * called once per dispatched native event, not on any per-op hot path. */
-  refFor(s: string): number | undefined {
-    for (const [ref, str] of this.#strings) if (str === s) return ref;
-    return undefined;
-  }
-
-  /** Whether `id` has a registered listener for `nameRef`, and the
-   * `Listener` itself (its declarative flags) — `mount.ts`'s delegated
-   * dispatch walk uses this to find the nearest ancestor with a
-   * registration. */
-  listenerFor(id: number, nameRef: number): Listener | undefined {
-    return this.#nodeListeners.get(id)?.get(nameRef);
-  }
-
   // -- commit ---------------------------------------------------------------
 
   commit(): void {
@@ -730,4 +653,20 @@ export class RemoteDomTranscoder implements FrameSink {
     }
     this.onCommit?.();
   }
+}
+
+/** The production path: a `RemoteDomTranscoder` wired to a fresh
+ * `DOMRemoteReceiver` over `root`. Unit tests construct
+ * `RemoteDomTranscoder` directly with a fake `RemoteConnection` instead
+ * (see the class doc) — this factory is what `mount.ts` calls. */
+export function createRemoteReceiver(root: Element): RemoteDomTranscoder {
+  const domReceiver = new DOMRemoteReceiver({
+    root,
+    call: (element, method, ...args) =>
+      method === NODE_CALL
+        ? element
+        : (element as unknown as Record<string, (...a: unknown[]) => unknown>)
+          [method](...args),
+  });
+  return new RemoteDomTranscoder(domReceiver.connection, domReceiver);
 }

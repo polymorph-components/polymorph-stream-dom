@@ -69,83 +69,100 @@ const demos: Array<{ name: string; page: string }> = [
   { name: "dominator-todomvc", page: "dominator.html" },
 ];
 
+// Matrix: both demos x both receiver backends (transport stays "direct" —
+// mount()'s default — since the transports differ only in how bytes reach
+// the decoder, not in anything this test could observe). Same assertions
+// for every cell: the native and remote-dom receivers are meant to be
+// behaviorally indistinguishable from the DOM's perspective.
+const receivers = ["native", "remote"] as const;
+
 Deno.test("TodoMVC demos", async (t) => {
   const { url, shutdown } = await startServer();
   console.log(`served dist/ at ${url} (commit ${stamp.commit})`);
   const browser = await chromium.launch();
   try {
     for (const demo of demos) {
-      await t.step(demo.name, async () => {
-        const page = await browser.newPage();
-        const consoleErrors: string[] = [];
-        const pageErrors: string[] = [];
-        page.on("console", (msg) => {
-          if (msg.type() === "error") consoleErrors.push(msg.text());
+      for (const receiver of receivers) {
+        await t.step(`${demo.name} (receiver=${receiver})`, async () => {
+          const page = await browser.newPage();
+          const consoleErrors: string[] = [];
+          const pageErrors: string[] = [];
+          page.on("console", (msg) => {
+            if (msg.type() === "error") consoleErrors.push(msg.text());
+          });
+          page.on("pageerror", (err) => pageErrors.push(String(err)));
+
+          page.setDefaultTimeout(30_000);
+          await page.goto(`${url}/${demo.page}?receiver=${receiver}`);
+          await page.evaluate(() => globalThis.__streamDom!.ready);
+          assert(
+            await page.evaluate(() => globalThis.__streamDom!.mounted),
+            `${demo.page} (receiver=${receiver}) failed to mount`,
+          );
+
+          const newTodo = page.locator(".new-todo");
+          await newTodo.waitFor({ state: "visible" });
+
+          // Add "buy milk".
+          await newTodo.fill("buy milk");
+          await newTodo.press("Enter");
+          const items = page.locator(".todo-list li");
+          await assertVisibleCount(items, 1);
+          await assertText(items.first().locator("label"), "buy milk");
+          await assertText(page.locator(".todo-count"), "1 item left");
+
+          // Toggle it complete.
+          await items.first().locator(".toggle").click();
+          await assertHasClass(items.first(), "completed");
+          await assertText(page.locator(".todo-count"), "0 items left");
+
+          // Add a second todo, then filter to Completed.
+          await newTodo.fill("walk dog");
+          await newTodo.press("Enter");
+          await assertVisibleCount(items, 2);
+          await page.locator(".filters a", { hasText: "Completed" }).click();
+          await assertVisibleCount(page.locator(".todo-list li:visible"), 1);
+          await assertText(
+            page.locator(".todo-list li:visible label"),
+            "buy milk",
+          );
+
+          // Back to All to keep editing/destroy interactions simple.
+          await page.locator(".filters a", { hasText: "All" }).click();
+          await assertVisibleCount(items, 2);
+
+          // Edit "walk dog" -> "walk the dog".
+          const second = items.nth(1);
+          await second.locator("label").dblclick();
+          const editInput = second.locator(".edit");
+          await editInput.fill("walk the dog");
+          await editInput.press("Enter");
+          await assertText(second.locator("label"), "walk the dog");
+
+          // Destroy both.
+          for (const _ of [0, 1]) {
+            await items.first().hover();
+            await items.first().locator(".destroy").click({ force: true });
+          }
+          await assertVisibleCount(items, 0);
+
+          assertEquals(
+            consoleErrors,
+            [],
+            `console errors on ${demo.page} (receiver=${receiver})`,
+          );
+          assertEquals(
+            pageErrors,
+            [],
+            `page errors on ${demo.page} (receiver=${receiver})`,
+          );
+
+          await page.screenshot({
+            path: `/tmp/opencode/e2e/${demo.name}-${receiver}.png`,
+          });
+          await page.close();
         });
-        page.on("pageerror", (err) => pageErrors.push(String(err)));
-
-        page.setDefaultTimeout(30_000);
-        await page.goto(`${url}/${demo.page}`);
-        await page.evaluate(() => globalThis.__streamDom!.ready);
-        assert(
-          await page.evaluate(() => globalThis.__streamDom!.mounted),
-          `${demo.page} failed to mount`,
-        );
-
-        const newTodo = page.locator(".new-todo");
-        await newTodo.waitFor({ state: "visible" });
-
-        // Add "buy milk".
-        await newTodo.fill("buy milk");
-        await newTodo.press("Enter");
-        const items = page.locator(".todo-list li");
-        await assertVisibleCount(items, 1);
-        await assertText(items.first().locator("label"), "buy milk");
-        await assertText(page.locator(".todo-count"), "1 item left");
-
-        // Toggle it complete.
-        await items.first().locator(".toggle").click();
-        await assertHasClass(items.first(), "completed");
-        await assertText(page.locator(".todo-count"), "0 items left");
-
-        // Add a second todo, then filter to Completed.
-        await newTodo.fill("walk dog");
-        await newTodo.press("Enter");
-        await assertVisibleCount(items, 2);
-        await page.locator(".filters a", { hasText: "Completed" }).click();
-        await assertVisibleCount(page.locator(".todo-list li:visible"), 1);
-        await assertText(
-          page.locator(".todo-list li:visible label"),
-          "buy milk",
-        );
-
-        // Back to All to keep editing/destroy interactions simple.
-        await page.locator(".filters a", { hasText: "All" }).click();
-        await assertVisibleCount(items, 2);
-
-        // Edit "walk dog" -> "walk the dog".
-        const second = items.nth(1);
-        await second.locator("label").dblclick();
-        const editInput = second.locator(".edit");
-        await editInput.fill("walk the dog");
-        await editInput.press("Enter");
-        await assertText(second.locator("label"), "walk the dog");
-
-        // Destroy both.
-        for (const _ of [0, 1]) {
-          await items.first().hover();
-          await items.first().locator(".destroy").click({ force: true });
-        }
-        await assertVisibleCount(items, 0);
-
-        assertEquals(consoleErrors, [], `console errors on ${demo.page}`);
-        assertEquals(pageErrors, [], `page errors on ${demo.page}`);
-
-        await page.screenshot({
-          path: `/tmp/opencode/e2e/${demo.name}.png`,
-        });
-        await page.close();
-      });
+      }
     }
   } finally {
     await browser.close();

@@ -9,7 +9,7 @@ import {
 } from "@remote-dom/core";
 import type { RemoteConnection, RemoteMutationRecord } from "@remote-dom/core";
 import { RemoteDomTranscoder } from "../src/remote.ts";
-import type { Listener, TemplateNode } from "../src/frames.ts";
+import type { TemplateNode } from "../src/frames.ts";
 
 class FakeConnection implements RemoteConnection {
   batches: RemoteMutationRecord[][] = [];
@@ -436,65 +436,9 @@ Deno.test("register-template, clone, bind-path, then set-text on the bound inter
   ]);
 });
 
-Deno.test("invalid template throws: out-of-range child index", () => {
-  const { t } = transcoder();
-  const nodes: TemplateNode[] = [
-    {
-      kind: "element",
-      element: { tag: 0, ns: undefined, attrs: [], children: [5] },
-    },
-  ];
-  assertThrows(() => t.registerTemplate(1, nodes, [0]));
-});
-
-Deno.test("invalid template throws: a node referenced more than once", () => {
-  const { t } = transcoder();
-  const nodes: TemplateNode[] = [
-    {
-      kind: "element",
-      element: { tag: 0, ns: undefined, attrs: [], children: [1, 2] },
-    },
-    { kind: "text", text: "a" },
-    {
-      kind: "element",
-      element: { tag: 0, ns: undefined, attrs: [], children: [1] },
-    },
-  ];
-  assertThrows(() => t.registerTemplate(1, nodes, [0]));
-});
-
-Deno.test("invalid template throws: cyclic", () => {
-  const { t } = transcoder();
-  // Node 0 is its own root and its own child — this is only reachable if a
-  // node is referenced by more than one parent's children, which the
-  // "referenced more than once" check above already forbids for a node
-  // that is ALSO a child; a self-referential ROOT (never listed as
-  // anyone's child) still slips past that check, so acyclicity needs its
-  // own walk.
-  const nodes: TemplateNode[] = [
-    {
-      kind: "element",
-      element: { tag: 0, ns: undefined, attrs: [], children: [0] },
-    },
-  ];
-  assertThrows(() => t.registerTemplate(1, nodes, [0]));
-});
-
-// B3: acyclicity must be checked across every node in the arena, not just
-// the subtrees reachable from a declared root — an orphaned cyclic
-// subgraph would otherwise pass validation and loop forever the moment
-// anything ever reached it.
-Deno.test("invalid template throws: cyclic subgraph unreachable from any root", () => {
-  const { t } = transcoder();
-  const nodes: TemplateNode[] = [
-    { kind: "text", text: "a" }, // the only declared root
-    {
-      kind: "element",
-      element: { tag: 0, ns: undefined, attrs: [], children: [1] }, // self-cycle
-    },
-  ];
-  assertThrows(() => t.registerTemplate(1, nodes, [0]));
-});
+// Arena validation itself (range/cycle checks) is tested directly against
+// `validateTemplateArena` in templates_test.ts — these tests are what's
+// left specific to the transcoder: tag/attribute resolution and cloning.
 
 Deno.test("clone-template's root is an ordinal into RegisterTemplate.roots, not a node index", () => {
   const { t, conn } = transcoder();
@@ -548,61 +492,8 @@ Deno.test("bind-marker is unsupported", () => {
   assertThrows(() => t.bindMarker(1, 2), Error, "hydration is not supported");
 });
 
-Deno.test("listener registry: add/remove bookkeeping and pending queues", () => {
-  const { t } = transcoder();
-  t.internString(1, "div");
-  t.createElement(10, 1, undefined);
-
-  const listener: Listener = {
-    target: { kind: "node", id: 10 },
-    name: 5,
-    bubbles: true,
-    capture: false,
-    passive: false,
-    preventDefault: false,
-    stopPropagation: false,
-  };
-  t.addListener(listener);
-  assertEquals(t.listenerFor(10, 5), listener);
-  assertEquals(t.pendingAttach, [{ target: listener.target, listener }]);
-
-  t.removeListener(listener);
-  assertEquals(t.listenerFor(10, 5), undefined);
-  assertEquals(t.pendingDetach, [{ target: listener.target, listener }]);
-});
-
-Deno.test("listener registry: global (window/document) add/remove is tracked separately from node listeners", () => {
-  const { t } = transcoder();
-
-  const winListener: Listener = {
-    target: { kind: "window" },
-    name: 4,
-    bubbles: false,
-    capture: false,
-    passive: false,
-    preventDefault: false,
-    stopPropagation: false,
-  };
-  const docListener: Listener = {
-    ...winListener,
-    target: { kind: "document" },
-    name: 6,
-  };
-  t.addListener(winListener);
-  t.addListener(docListener);
-  assertEquals(t.pendingAttach, [
-    { target: winListener.target, listener: winListener },
-    { target: docListener.target, listener: docListener },
-  ]);
-
-  t.removeListener(winListener);
-  assertEquals(t.pendingDetach, [{
-    target: winListener.target,
-    listener: winListener,
-  }]);
-  // The document listener is untouched by removing the window one — they
-  // are not stored in the same bucket.
-});
+// Listener add/remove bookkeeping is tested directly against
+// `ListenerRegistry` in receiver_test.ts (the class every backend shares).
 
 Deno.test("onCommit runs after mutate, and only when there is something to mutate or always?", () => {
   const { t, conn } = transcoder();

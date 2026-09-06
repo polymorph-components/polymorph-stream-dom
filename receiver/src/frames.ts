@@ -357,9 +357,16 @@ function decodeTemplateNode(r: Reader): TemplateNode {
 export class FrameDecoder {
   #sink: FrameSink;
   #pending: Uint8Array = new Uint8Array(0);
+  /** Frame messages decoded so far, whether or not they carried an op —
+   * a benchmark harness's `Mounted.stats.frames` (mount.ts). */
+  #frameCount = 0;
 
   constructor(sink: FrameSink) {
     this.#sink = sink;
+  }
+
+  get frameCount(): number {
+    return this.#frameCount;
   }
 
   /** Append a chunk and decode every complete frame now available. The
@@ -404,6 +411,7 @@ export class FrameDecoder {
   }
 
   #decodeFrame(r: Reader): void {
+    this.#frameCount++;
     let commit = false;
     let sawAnyOpField = false;
     let dispatch: (() => void) | undefined;

@@ -18,8 +18,9 @@
     <footer class="info">
       <p>TodoMVC markup/CSS from <a href="https://todomvc.com">todomvc.com</a>.
   Producer: Dominator, compiled to a <code>polymorph:stream-dom</code> wasm
-  component. Receiver: <code>@polymorph/stream-dom-receiver</code>, streaming
-  into Shopify's <a href="https://github.com/Shopify/remote-dom">remote-dom</a>.</p>
+  component. Receiver: <code>@polymorph/stream-dom-receiver</code>, applying
+  the stream to the DOM directly (<a href="?receiver=remote">?receiver=remote</a>
+  routes it through Shopify's <a href="https://github.com/Shopify/remote-dom">remote-dom</a> instead).</p>
     </footer>
     <script type="module" src="./entry.js"></script>
   </body>
