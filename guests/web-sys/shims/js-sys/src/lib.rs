@@ -16,6 +16,19 @@ fn js<T: AsRef<JsValue>>(v: &T) -> &JsValue {
 
 wrapper_type!(Object, "Object");
 
+impl Object {
+    /// `{}` — a fresh empty property bag.
+    pub fn new() -> Object {
+        Object::from(wasm_bindgen::__rt::PlainObject::new())
+    }
+}
+
+impl Default for Object {
+    fn default() -> Object {
+        Object::new()
+    }
+}
+
 wrapper_type!(Function, "Function", extends: Object);
 
 wrapper_type!(JsString, "String", extends: Object);
@@ -36,7 +49,7 @@ impl Error {
     /// shim are plain strings, so fall back to the value itself.
     pub fn message(&self) -> JsString {
         let v = js(self);
-        let m = v.get_prop("message");
+        let m = v.get_prop("message").unwrap_or(JsValue::UNDEFINED);
         JsString::from(if m.is_undefined() { v.clone() } else { m })
     }
 }
@@ -53,7 +66,8 @@ pub struct Reflect;
 
 impl Reflect {
     pub fn set(target: &JsValue, key: &JsValue, value: &JsValue) -> Result<bool, JsValue> {
-        Ok(target.set_prop(&key_str(key), value.clone()))
+        target.set_prop(&key_str(key), value.clone())?;
+        Ok(true)
     }
 }
 

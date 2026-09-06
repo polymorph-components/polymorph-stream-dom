@@ -270,13 +270,13 @@ impl JsObject for NodeData {
         self
     }
 
-    fn get(&self, key: &str) -> JsValue {
-        self.prop(key)
+    fn get(&self, key: &str) -> Result<JsValue, JsValue> {
+        Ok(self.prop(key))
     }
 
-    fn set(&self, key: &str, value: JsValue) -> bool {
+    fn set(&self, key: &str, value: JsValue) -> Result<(), JsValue> {
         crate::dom::reflect_set(self, key, value);
-        true
+        Ok(())
     }
 }
 

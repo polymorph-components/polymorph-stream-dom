@@ -10,16 +10,19 @@
 //! # What a `JsValue` is here
 //!
 //! A tagged Rust enum. Objects are `Rc<dyn JsObject>`, and the object
-//! protocol is deliberately tiny: `class_chain`, `get`, `set`, `delete`,
+//! protocol is deliberately tiny: `class_chain`, `get`, `set`, `invoke`,
 //! `call`. There are no prototype chains beyond `class_chain`, no
 //! property descriptors and no coercion tables. This is a shim, not a JS
 //! engine.
 //!
-//! # What is deliberately missing
+//! # How bindings reach it
 //!
-//! The `#[wasm_bindgen]` attribute macro. A crate that writes
-//! `use wasm_bindgen::prelude::wasm_bindgen;` will not compile against
-//! this shim; nothing in dominator, gloo-events or futures-signals does.
+//! The real `web_sys` crate is compiled against a fake `#[wasm_bindgen]`
+//! proc macro that rewrites its `extern "C"` blocks into calls on this
+//! protocol, with argument lowering and return lifting from
+//! [`__rt::IntoJs`] / [`__rt::FromJs`]. [`JsObject`]'s doc comment is the
+//! contract between that macro and the fake DOM that implements the
+//! objects.
 //!
 //! Anything a framework reaches that cannot be honoured **panics with a
 //! named message** rather than quietly returning `undefined`: a silent
@@ -29,6 +32,9 @@ use std::any::Any;
 use std::fmt;
 use std::rc::Rc;
 
+#[path = "rt.rs"]
+#[doc(hidden)]
+pub mod __rt;
 pub mod closure;
 
 pub use closure::Closure;
@@ -36,7 +42,41 @@ pub use closure::Closure;
 /// The object protocol. Everything an object can do in this shim.
 ///
 /// Implementors: the fake DOM's nodes (`stream-dom-fakedom`), event
-/// objects, and the function objects a [`Closure`] lowers to.
+/// objects, [`__rt::PlainObject`], and the function objects a [`Closure`]
+/// lowers to.
+///
+/// # What the proc macro emits
+///
+/// Each `web_sys` binding attribute maps to exactly one protocol call on
+/// the receiver, with the `js_name` (defaulting to the Rust name in
+/// lowerCamelCase, as the real macro does) as the key:
+///
+/// | binding attribute                     | protocol call                |
+/// |---------------------------------------|------------------------------|
+/// | `method, getter, js_name = X`         | `get("X")`                   |
+/// | `method, setter, js_name = X`         | `set("X", v)`                |
+/// | `method, js_name = X`                 | `invoke("X", args)`          |
+/// | `method, indexing_getter`             | `get(&index.to_string())`    |
+/// | `method, indexing_setter`             | `set(&index.to_string(), v)` |
+/// | `constructor`                         | [`__rt::construct`]          |
+/// | `static_method_of` / `js_namespace`   | [`__rt::call_static`]        |
+///
+/// Arguments arrive lowered by [`__rt::IntoJs`] and results are lifted by
+/// [`__rt::FromJs`]; read both, they define what an implementor may
+/// return. In short: every numeric type is a Number, strings are Strings,
+/// `None` is `undefined`, wrapper types pass through unchanged; and a
+/// primitive return is checked strictly, so returning `undefined` where
+/// the binding declares `String` is a panic, not an empty string.
+///
+/// # Exceptions
+///
+/// `Err` is a thrown exception. A call site declared
+/// `#[wasm_bindgen(catch)]` in web-sys surfaces it as
+/// `Result<_, JsValue>`; every other call site hands it to
+/// [`__rt::uncaught`], which panics. So an implementor should return `Err`
+/// only where a real DOM would genuinely throw — "I do not implement
+/// this" is also an `Err`, deliberately, because the defaults below make
+/// unimplemented members loud.
 pub trait JsObject: Any {
     /// The class and every class it inherits from, most derived first,
     /// e.g. `["HTMLInputElement", "HTMLElement", "Element", "Node",
@@ -49,17 +89,50 @@ pub trait JsObject: Any {
     /// [`JsValue::downcast_ref`]. Implementors write `self`.
     fn as_any(&self) -> &dyn Any;
 
-    fn get(&self, _key: &str) -> JsValue {
-        JsValue::UNDEFINED
+    /// Property read: a `getter` binding, an `indexing_getter`, or
+    /// `Reflect.get`. `Err` is a thrown exception.
+    ///
+    /// The default reads `undefined` for every key, matching JS: an
+    /// absent property is not an error. A getter whose value the fake DOM
+    /// does not model therefore reaches the caller as `undefined`, which
+    /// the strict [`__rt::FromJs`] lift turns into a panic naming the key
+    /// at the point of use.
+    fn get(&self, _key: &str) -> Result<JsValue, JsValue> {
+        Ok(JsValue::UNDEFINED)
     }
 
-    /// `true` if the write was accepted, mirroring `Reflect.set`.
-    fn set(&self, _key: &str, _value: JsValue) -> bool {
-        false
+    /// Property write: a `setter` binding, an `indexing_setter`, or
+    /// `Reflect.set`. `Err` is a thrown exception.
+    ///
+    /// The default refuses, because a dropped write is silent damage: an
+    /// object that accepts arbitrary properties opts in by overriding.
+    fn set(&self, key: &str, _value: JsValue) -> Result<(), JsValue> {
+        Err(JsValue::from_str(&format!(
+            "TypeError: cannot set property '{}' of [object {}]",
+            key,
+            self.class_chain().first().unwrap_or(&"Object"),
+        )))
     }
 
-    /// Only function objects are callable; everything else reports the
-    /// `TypeError` a JS engine would throw.
+    /// Method call: `obj.method(...args)`. `Err` is a thrown exception.
+    ///
+    /// The default is the `TypeError` a JS engine raises for a missing
+    /// method, which for a non-`catch` call site becomes a panic naming
+    /// the class and method — the intended signal for "the dispatch table
+    /// is missing an entry".
+    fn invoke(&self, method: &str, _args: &[JsValue]) -> Result<JsValue, JsValue> {
+        Err(JsValue::from_str(&format!(
+            "TypeError: {}.{} is not a function",
+            self.class_chain().first().unwrap_or(&"Object"),
+            method,
+        )))
+    }
+
+    /// Call THIS object as a function: `f.call(this, ...args)`. Only
+    /// function objects — what a [`Closure`] lowers to, and the
+    /// constructors [`__rt::construct`] looks up on the global —
+    /// implement it; everything else reports the `TypeError` a JS engine
+    /// would throw.
     fn call(&self, _this: &JsValue, _args: &[JsValue]) -> Result<JsValue, JsValue> {
         Err(JsValue::from_str("TypeError: not a function"))
     }
@@ -83,6 +156,8 @@ pub struct JsValue(Inner);
 impl JsValue {
     pub const UNDEFINED: JsValue = JsValue(Inner::Undefined);
     pub const NULL: JsValue = JsValue(Inner::Null);
+    pub const TRUE: JsValue = JsValue(Inner::Bool(true));
+    pub const FALSE: JsValue = JsValue(Inner::Bool(false));
 
     // The real crate's name; changing it would break every caller.
     #[allow(clippy::should_implement_trait)]
@@ -135,6 +210,23 @@ impl JsValue {
         matches!(self.0, Inner::Null)
     }
 
+    pub fn is_object(&self) -> bool {
+        matches!(self.0, Inner::Object(_))
+    }
+
+    pub fn is_string(&self) -> bool {
+        matches!(self.0, Inner::String(_))
+    }
+
+    /// An object whose `class_chain` names `"Function"` — the shim's
+    /// whole notion of callability.
+    pub fn is_function(&self) -> bool {
+        match &self.0 {
+            Inner::Object(o) => o.class_chain().contains(&"Function"),
+            _ => false,
+        }
+    }
+
     #[doc(hidden)]
     pub fn class_chain(&self) -> Option<&[&'static str]> {
         match &self.0 {
@@ -154,23 +246,37 @@ impl JsValue {
         }
     }
 
-    /// `Reflect.get` / `Reflect.set` / `Reflect.deleteProperty` /
-    /// `Function.prototype.call`, routed to [`JsObject`]. Non-objects
-    /// behave as JS does for property reads (`undefined`) and refuse
-    /// writes.
+    /// `Reflect.get` / `Reflect.set` / a method call /
+    /// `Function.prototype.call`, routed to [`JsObject`].
+    ///
+    /// Non-objects behave as JS does for property reads (`undefined`) and
+    /// refuse everything else with a `TypeError`. `Err` is a thrown
+    /// exception throughout.
     #[doc(hidden)]
-    pub fn get_prop(&self, key: &str) -> JsValue {
+    pub fn get_prop(&self, key: &str) -> Result<JsValue, JsValue> {
         match &self.0 {
             Inner::Object(o) => o.get(key),
-            _ => JsValue::UNDEFINED,
+            _ => Ok(JsValue::UNDEFINED),
         }
     }
 
     #[doc(hidden)]
-    pub fn set_prop(&self, key: &str, value: JsValue) -> bool {
+    pub fn set_prop(&self, key: &str, value: JsValue) -> Result<(), JsValue> {
         match &self.0 {
             Inner::Object(o) => o.set(key, value),
-            _ => false,
+            _ => Err(JsValue::from_str(&format!(
+                "TypeError: cannot set property '{key}' of {self:?}"
+            ))),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn invoke(&self, method: &str, args: &[JsValue]) -> Result<JsValue, JsValue> {
+        match &self.0 {
+            Inner::Object(o) => o.invoke(method, args),
+            _ => Err(JsValue::from_str(&format!(
+                "TypeError: not an object, cannot call '{method}' on {self:?}"
+            ))),
         }
     }
 
@@ -257,6 +363,14 @@ impl PartialEq for JsValue {
         }
     }
 }
+
+/// `web_sys` derives `Eq` on every extern type (see
+/// `web-sys-0.3.105/src/features/gen_Element.rs`), so `JsValue` must be
+/// `Eq` for the generated bindings to compile. It is not truly
+/// reflexive — `NaN != NaN`, since Numbers compare with `f64::eq` — which
+/// is the same unsoundness the real crate ships with, for the same
+/// reason.
+impl Eq for JsValue {}
 
 impl fmt::Debug for JsValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -374,7 +488,12 @@ impl JsCast for JsValue {
 /// `AsRef<Ancestor>` for every ancestor, `From<Self> for JsValue`,
 /// `From<JsValue> for Self` (unchecked, as web-sys generates),
 /// `From<Self> for Ancestor`, `Deref` to the immediate parent (or to
-/// `JsValue` for a root type), plus `Clone`/`Debug`/`PartialEq`.
+/// `JsValue` for a root type), `__rt::IntoJs` for `Self` and `&Self`,
+/// `__rt::FromJs` for `Self` (unchecked), plus
+/// `Clone`/`Debug`/`PartialEq`/`Eq`.
+///
+/// The proc macro emits one invocation of this per `extern` type, so any
+/// impl every wrapper type needs belongs here rather than in the macro.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! wrapper_type {
@@ -419,10 +538,31 @@ macro_rules! wrapper_type {
     )*};
 
     (@common $name:ident, $class:literal) => {
-        #[derive(Clone, PartialEq)]
+        #[derive(Clone, PartialEq, Eq)]
         #[repr(transparent)]
         pub struct $name {
             obj: $crate::JsValue,
+        }
+
+        /// Lowering is the identity: the wrapper *is* the `JsValue`.
+        impl $crate::__rt::IntoJs for $name {
+            fn into_js(self) -> $crate::JsValue {
+                self.obj
+            }
+        }
+
+        impl $crate::__rt::IntoJs for &$name {
+            fn into_js(self) -> $crate::JsValue {
+                self.obj.clone()
+            }
+        }
+
+        /// Unchecked lift, as the real generated bindings do: the
+        /// `class_chain` is not consulted.
+        impl $crate::__rt::FromJs for $name {
+            fn from_js(v: $crate::JsValue) -> $name {
+                $name { obj: v }
+            }
         }
 
         impl $name {
@@ -526,8 +666,9 @@ pub fn throw_val(v: JsValue) -> ! {
 }
 
 pub mod prelude {
-    //! Note the absence of `wasm_bindgen`: this shim has no proc macro.
-    //! See the crate docs.
+    //! What `use wasm_bindgen::prelude::*;` brings in.
+    // wasm_bindgen macro: re-exported here by shims/wasm-bindgen-macro
+    // (next track), as `pub use wasm_bindgen_macro::wasm_bindgen;`.
     pub use crate::closure::Closure;
     pub use crate::{JsCast, JsValue, UnwrapThrowExt};
 }
