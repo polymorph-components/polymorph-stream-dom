@@ -87,7 +87,7 @@ async function waitForBenchRoot(): Promise<void> {
   const deadline = performance.now() + 10_000;
   while (!document.getElementById("bench")) {
     if (performance.now() > deadline) fatal("timed out waiting for #bench");
-    await new Promise((r) => requestAnimationFrame(r));
+    await new Promise((r) => setTimeout(r, 16));
   }
 }
 
@@ -106,10 +106,15 @@ async function ensureRows(mounted: Mounted, n: 1000 | 10000): Promise<void> {
   await clickId(mounted, n === 1000 ? "create-1k" : "create-10k");
 }
 
-/** Times exactly one dispatch: click -> settle -> next frame, and takes
- * the wire delta across that same window from `mounted.stats` (cumulative
- * counters since mount — see receiver/src/mount.ts's `Mounted.stats`
- * doc). */
+/** Times exactly one dispatch: click -> batch applied, and takes the wire
+ * delta across that same window from `mounted.stats` (cumulative counters
+ * since mount — see receiver/src/mount.ts's `Mounted.stats` doc).
+ *
+ * Deliberately NOT extended to the next animation frame: the final DOM is
+ * identical across producers, receivers and transports, so paint is not a
+ * differentiator, and `requestAnimationFrame` does not fire at all in some
+ * headless windows (tachometer opens each sample in a `window.open`
+ * popup), which stalled every sample on the first CI run. */
 async function timedClick(
   mounted: Mounted,
   fire: () => void,
@@ -118,7 +123,6 @@ async function timedClick(
   const t0 = performance.now();
   fire();
   await mounted.nextCommit();
-  await new Promise((r) => requestAnimationFrame(r));
   const t1 = performance.now();
   const after = mounted.stats;
   return {
