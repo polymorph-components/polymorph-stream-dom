@@ -101,6 +101,25 @@ export interface DriverOptions {
    * rejections and strict-decode errors surface synchronously out of
    * `push` instead — see `Driver.push`. */
   onError?(err: unknown): void;
+  /** Refuse real navigation out of the mount by default: every `submit`
+   * is `preventDefault()`-ed, and every `click` on an `<a href>` whose
+   * `href` is not a same-document fragment (`#...`) is too — installed
+   * as two root-level, capture-phase, non-passive listeners regardless
+   * of whether the producer registered anything at all (docs/design.md
+   * "Events", option C: "a per-event-type default policy at the
+   * receiver ... a registered `submit` listener implies preventDefault;
+   * a `click` listener on `<a href>` likewise"). This is deliberately
+   * BROADER than that phrasing: an unlistened `<form>`/`<a href>` is the
+   * dangerous case (real submit, real navigation, with no producer
+   * listener in the way to have its declarative flag inspected at all),
+   * so the receiver refuses by default rather than only when a listener
+   * happens to be registered. Off by default: the in-page polyengine
+   * mount uses option A (imperative `prevent-default`) and must keep
+   * today's behavior; a desktop/remote embedding with no imperative path
+   * sets this true so a `Dioxus`-style producer emitting no declarative
+   * flags at all (docs/design.md "Spike") does not submit every form and
+   * navigate every link for real. */
+  defaultPreventDefault?: boolean;
   /** Deliver one event to the producer. `target`/`nameRef`/`payload` are
    * exactly what `handle-event` takes; `ev` is the live native Event, lent
    * for the synchronous prefix (the component glue wraps it in the WIT
@@ -220,6 +239,50 @@ export function createDriver(opts: DriverOptions): Driver {
     } finally {
       gate.endApply();
     }
+  }
+
+  // -- default preventDefault (docs/design.md "Events", option C's
+  // per-event-type default; see `DriverOptions.defaultPreventDefault`'s
+  // doc for why this is two unconditional root-level listeners rather
+  // than a check inside `fire`) -------------------------------------------
+  //
+  // Capture phase and explicitly non-passive: registered once, at
+  // construction, on `opts.root` itself, so neither the passive-listener
+  // "preventDefault is a no-op" hazard nor the delegated-listener refcount
+  // bookkeeping above ever comes into it — this fires (and can call
+  // `preventDefault`) before ANY producer-registered listener, delegated
+  // or direct, sees the event at all.
+
+  function defaultSubmitHandler(e: Event): void {
+    e.preventDefault();
+  }
+
+  function defaultClickHandler(e: Event): void {
+    let node: Node | null = e.target as Node | null;
+    while (node) {
+      if (node.nodeType === 1) {
+        const el = node as Element;
+        if (el.tagName.toUpperCase() === "A" && el.hasAttribute("href")) {
+          if (!(el.getAttribute("href") ?? "").startsWith("#")) {
+            e.preventDefault();
+          }
+          break;
+        }
+      }
+      if (node === opts.root) break;
+      node = node.parentNode;
+    }
+  }
+
+  if (opts.defaultPreventDefault) {
+    opts.root.addEventListener("submit", defaultSubmitHandler, {
+      capture: true,
+      passive: false,
+    });
+    opts.root.addEventListener("click", defaultClickHandler, {
+      capture: true,
+      passive: false,
+    });
   }
 
   // -- event delegation -------------------------------------------------------
@@ -499,6 +562,14 @@ export function createDriver(opts: DriverOptions): Driver {
     if (disposed) return;
     disposed = true;
     gate.dispose();
+    if (opts.defaultPreventDefault) {
+      opts.root.removeEventListener("submit", defaultSubmitHandler, {
+        capture: true,
+      });
+      opts.root.removeEventListener("click", defaultClickHandler, {
+        capture: true,
+      });
+    }
     for (const entry of rootListeners.values()) {
       opts.root.removeEventListener(entry.name, entry.handler, {
         capture: entry.capture,

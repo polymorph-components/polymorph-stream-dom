@@ -21,16 +21,18 @@ fn main() {
         .compile_fds(file_descriptor_set)
         .expect("prost-build: compile failed");
 
-    let stream_dom_proto =
-        std::fs::read_to_string(format!("{proto_dir}/stream-dom.proto")).expect("read stream-dom.proto");
+    let stream_dom_proto = std::fs::read_to_string(format!("{proto_dir}/stream-dom.proto"))
+        .expect("read stream-dom.proto");
     let mut matches = stream_dom_proto
         .lines()
         .filter_map(|line| line.strip_prefix("// PROTOCOL VERSION: "));
-    let version = matches
-        .next()
-        .unwrap_or_else(|| panic!("no `// PROTOCOL VERSION: <n>` line found in {proto_dir}/stream-dom.proto"));
+    let version = matches.next().unwrap_or_else(|| {
+        panic!("no `// PROTOCOL VERSION: <n>` line found in {proto_dir}/stream-dom.proto")
+    });
     if matches.next().is_some() {
-        panic!("more than one `// PROTOCOL VERSION: <n>` line found in {proto_dir}/stream-dom.proto");
+        panic!(
+            "more than one `// PROTOCOL VERSION: <n>` line found in {proto_dir}/stream-dom.proto"
+        );
     }
     let version: u32 = version
         .parse()

@@ -1,5 +1,5 @@
 {
-  "workspace": ["./receiver", "./web"],
+  "workspace": ["./receiver", "./web", "./host/desktop"],
   "imports": {
     "@polyengine/runtime/embedder": "jsr:@polyengine/runtime@^0.6.2/embedder",
     "@polyengine/runtime/shim": "jsr:@polyengine/runtime@^0.6.2/shim",
@@ -15,14 +15,16 @@
     "@std/fs": "jsr:@std/fs@^1",
     "@std/http/file-server": "jsr:@std/http@^1/file-server",
     "playwright": "npm:playwright@^1.58",
-    "linkedom": "npm:linkedom@^0.18"
+    "linkedom": "npm:linkedom@^0.18",
+    "@tauri-apps/api": "npm:@tauri-apps/api@^2"
   },
   "compilerOptions": {
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"],
     "strict": true
   },
   "tasks": {
-    "check": "deno check receiver/src receiver/tests web/build.ts web/translate.ts web/entry.ts web/bench.ts web/e2e bench/tachometer.ts bench/run.ts bench/wire.ts",
+    "check": "deno check receiver/src receiver/tests web/build.ts web/translate.ts web/entry.ts web/bench.ts web/e2e bench/tachometer.ts bench/run.ts bench/wire.ts host/desktop/ui host/desktop/build.ts host/desktop/e2e",
     "test": "deno test --allow-read=. receiver/tests/"
   }
 }
+

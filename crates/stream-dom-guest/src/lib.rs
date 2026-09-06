@@ -187,7 +187,13 @@ impl Batch {
 
     /// Set an attribute to an opaque asset handle (proto/stream-dom.proto
     /// `SetAttribute.asset`) rather than a text value.
-    pub fn set_attribute_asset(&mut self, id: NodeId, name: StrRef, ns: Option<StrRef>, handle: &[u8]) {
+    pub fn set_attribute_asset(
+        &mut self,
+        id: NodeId,
+        name: StrRef,
+        ns: Option<StrRef>,
+        handle: &[u8],
+    ) {
         self.push(proto::frame::Op::SetAttribute(proto::SetAttribute {
             id,
             name,

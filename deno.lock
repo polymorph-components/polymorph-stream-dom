@@ -25,6 +25,7 @@
     "jsr:@std/path@^1.1.6": "1.1.6",
     "jsr:@std/streams@^1.1.2": "1.1.2",
     "npm:@remote-dom/core@^1.11.1": "1.11.1",
+    "npm:@tauri-apps/api@2": "2.11.1",
     "npm:linkedom@0.18": "0.18.13",
     "npm:playwright@1.58": "1.58.2",
     "npm:playwright@^1.58.0": "1.58.2"
@@ -119,6 +120,9 @@
     },
     "@remote-dom/polyfill@1.5.1": {
       "integrity": "sha512-eaWdIVKZpNfbqspKkRQLVxiFv/7vIw8u0FVA5oy52YANFbO/WVT0GU+PQmRt/QUSijaB36HBAqx7stjo8HGpVQ=="
+    },
+    "@tauri-apps/api@2.11.1": {
+      "integrity": "sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA=="
     },
     "boolbase@2.0.0": {
       "integrity": "sha512-DkVaaQHymRhpYEYo9x1oo7Q7B0Y6KJUsjm3c9eTyFDby4MHLBTwZ6ZDWBel5zrYxj1WsZgC5oLpiz+93MluXeA=="
@@ -263,6 +267,7 @@
       "jsr:@std/http@1",
       "jsr:@std/path@1",
       "npm:@remote-dom/core@^1.11.1",
+      "npm:@tauri-apps/api@2",
       "npm:linkedom@0.18",
       "npm:playwright@^1.58.0"
     ]
