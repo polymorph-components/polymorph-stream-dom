@@ -44,4 +44,7 @@ jobs:
       - run: just check
       - run: just test
       - run: just components
+      # Chromium's shared-library deps; the justfile's own install step is
+      # the browser binary only (idempotent, so it re-runs harmlessly).
+      - run: deno run -A npm:playwright@1.58 install --with-deps chromium
       - run: just e2e
