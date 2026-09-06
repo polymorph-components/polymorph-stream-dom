@@ -9,11 +9,21 @@
 //! [`externs::expand`].
 //!
 //! It exists for exactly one consumer: the real, unmodified `web-sys`
-//! 0.3.105 from crates.io, whose ~8000 generated bindings are all
-//! `extern "C"` items. Everything else a `#[wasm_bindgen]` can be
-//! attached to (`struct`, `impl`, `fn`, `start`) describes an *export* to
-//! JS, which means nothing in a component, so those items pass through
-//! with the attribute stripped.
+//! 0.3.105 from crates.io. That crate uses `#[wasm_bindgen]` in exactly
+//! two shapes, and so does this macro:
+//!
+//! * on an `extern "C"` block — its ~8000 generated bindings, handled by
+//!   [`externs::expand`];
+//! * on a string-discriminant `enum` (`ScrollBehavior` and kin), handled
+//!   by [`string_enum`].
+//!
+//! Everything else a `#[wasm_bindgen]` can be attached to (`struct`,
+//! `impl`, `fn`, `start`, a C-like `enum`) describes an *export* to JS,
+//! which means nothing in a component: those items pass through with the
+//! attribute stripped and nothing generated. Anything genuinely outside
+//! the two shapes above — a `static` in an extern block, a block-level
+//! argument list, a module-backed block — is a `compile_error!` naming
+//! it, because a shim that guesses is worse than one that stops.
 
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
@@ -37,17 +47,12 @@ fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let outer = Attrs::parse(attr)?;
     match syn::parse2::<syn::Item>(item)? {
         syn::Item::ForeignMod(block) => {
-            let (mut block_attrs, rust_attrs) = Attrs::take_from(block.attrs.clone())?;
-            block_attrs.inherit(&outer);
-            let block = syn::ItemForeignMod {
-                attrs: Vec::new(),
-                ..block
-            };
-            let body = externs::expand(&block_attrs, block)?;
-            Ok(quote! { #(#rust_attrs)* #body })
+            outer.reject_arguments("an `extern \"C\"` block")?;
+            let (block_attrs, _) = Attrs::take_from(block.attrs.clone())?;
+            block_attrs.reject_arguments("an `extern \"C\"` block")?;
+            externs::expand(block)
         }
         syn::Item::Enum(e) if is_string_enum(&e) => string_enum(e),
-        syn::Item::Enum(e) => numeric_enum(e),
         mut other => {
             strip(&mut other);
             Ok(other.into_token_stream())
@@ -139,32 +144,6 @@ fn string_enum(e: syn::ItemEnum) -> syn::Result<TokenStream> {
         impl From<#name> for ::wasm_bindgen::JsValue {
             fn from(v: #name) -> ::wasm_bindgen::JsValue {
                 ::wasm_bindgen::__rt::IntoJs::into_js(v)
-            }
-        }
-    })
-}
-
-/// A C-like enum with ordinary discriminants passes through unchanged and
-/// crosses the protocol as a Number, which is what the real bindings do.
-fn numeric_enum(mut e: syn::ItemEnum) -> syn::Result<TokenStream> {
-    strip_attrs(&mut e.attrs);
-    let name = e.ident.clone();
-    let names: Vec<_> = e.variants.iter().map(|v| v.ident.clone()).collect();
-    let unknown = format!("wasm-bindgen fake: not a {name} value: ");
-    Ok(quote! {
-        #e
-
-        impl ::wasm_bindgen::__rt::IntoJs for #name {
-            fn into_js(self) -> ::wasm_bindgen::JsValue {
-                ::wasm_bindgen::JsValue::from_f64(self as u32 as f64)
-            }
-        }
-
-        impl ::wasm_bindgen::__rt::FromJs for #name {
-            fn from_js(v: ::wasm_bindgen::JsValue) -> #name {
-                let n = <u32 as ::wasm_bindgen::__rt::FromJs>::from_js(v);
-                #( if n == #name::#names as u32 { return #name::#names; } )*
-                ::core::panic!("{}{}", #unknown, n)
             }
         }
     })

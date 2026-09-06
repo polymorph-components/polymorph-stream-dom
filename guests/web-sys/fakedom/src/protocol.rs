@@ -7,10 +7,10 @@
 //! the dispatch table that turns those calls back into the [`crate::dom`]
 //! operations the protocol producer is built out of.
 //!
-//! It is a *translation layer*, not a model: everything it does, it does by
-//! calling `dom::*`. It replaces the hand-written fake `web-sys` crate that
-//! used to sit in `shims/web-sys` (deleted in the commit that introduced
-//! the macro), member for member.
+//! It is a *translation layer*, not a model: the shadow DOM, the frames and
+//! the event objects all live in the sibling modules, and every arm here
+//! resolves to one call into them. Its inventory is exactly the members
+//! dominator 0.5.38, gloo-events 0.1.2 and the TodoMVC port reach.
 //!
 //! # The keys
 //!
@@ -477,6 +477,16 @@ impl JsObject for DomTokenListObj {
         self
     }
 
+    /// Nothing here is readable: `classList` is write-only in this fake,
+    /// because the class list the receiver has is whatever the last
+    /// `set-attribute` said. Overriding rather than inheriting the trait
+    /// default matters -- `DomTokenList::value` / `length` / the indexing
+    /// getter would otherwise answer `undefined`, which reaches the caller
+    /// as a silent `None` or an unnamed lift panic.
+    fn get(&self, key: &str) -> Result<JsValue, JsValue> {
+        missing(self, key)
+    }
+
     fn invoke(&self, method: &str, args: &[JsValue]) -> Result<JsValue, JsValue> {
         // `add` and `remove` are variadic in the DOM; web-sys spells each
         // arity as its own binding (`add_1`, `add_2`, ...) but they all
@@ -627,9 +637,6 @@ impl JsObject for EventData {
             // web-sys lifts this unchecked as an `EventTarget`; identity is
             // what handlers use it for.
             "target" => self.target.value(),
-            "currentTarget" => node_or_null(self.current_target()),
-            "bubbles" => JsValue::from_bool(self.bubbles),
-            "defaultPrevented" => JsValue::from_bool(self.default_prevented()),
 
             // --- MouseEvent and its subclasses ---
             //

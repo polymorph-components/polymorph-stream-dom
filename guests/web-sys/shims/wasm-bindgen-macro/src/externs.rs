@@ -15,15 +15,7 @@ use syn::spanned::Spanned;
 
 use crate::attrs::Attrs;
 
-pub fn expand(outer: &Attrs, block: syn::ItemForeignMod) -> syn::Result<TokenStream> {
-    // A module-backed block (`module = "..."`, `raw_module`, `inline_js`)
-    // names JS this shim cannot load. Its types are still real wrapper
-    // types; its functions panic when called, which keeps such a crate
-    // compiling without pretending the module exists.
-    let module = ["module", "raw_module", "inline_js"]
-        .iter()
-        .find_map(|k| outer.string(k));
-
+pub fn expand(block: syn::ItemForeignMod) -> syn::Result<TokenStream> {
     let mut out = TokenStream::new();
     // Methods are grouped into one `impl` per receiver type, keyed by the
     // type's rendered tokens so `Element` and `::js_sys::Object` stay apart.
@@ -31,9 +23,9 @@ pub fn expand(outer: &Attrs, block: syn::ItemForeignMod) -> syn::Result<TokenStr
 
     for item in block.items {
         match item {
-            syn::ForeignItem::Type(ty) => out.extend(expand_type(outer, ty)?),
+            syn::ForeignItem::Type(ty) => out.extend(expand_type(ty)?),
             syn::ForeignItem::Fn(f) => {
-                let (self_ty, tokens) = expand_fn(outer, f, module.as_deref())?;
+                let (self_ty, tokens) = expand_fn(f)?;
                 match self_ty {
                     None => out.extend(tokens),
                     Some(ty) => {
@@ -70,9 +62,8 @@ pub fn expand(outer: &Attrs, block: syn::ItemForeignMod) -> syn::Result<TokenStr
 /// emits `Clone`/`PartialEq`/`Eq` and a hand-written `Debug`, which is
 /// exactly the set web-sys derives (`gen_Element.rs:8`), so passing it
 /// through would be a duplicate impl.
-fn expand_type(outer: &Attrs, item: syn::ForeignItemType) -> syn::Result<TokenStream> {
-    let (mut attrs, rust_attrs) = Attrs::take_from(item.attrs)?;
-    attrs.inherit(outer);
+fn expand_type(item: syn::ForeignItemType) -> syn::Result<TokenStream> {
+    let (attrs, rust_attrs) = Attrs::take_from(item.attrs)?;
     let rust_attrs: Vec<_> = rust_attrs
         .into_iter()
         .filter(|a| !a.path().is_ident("derive"))
@@ -121,14 +112,9 @@ enum Op {
     Call(String),
 }
 
-fn expand_fn(
-    outer: &Attrs,
-    item: syn::ForeignItemFn,
-    module: Option<&str>,
-) -> syn::Result<(Option<syn::Type>, TokenStream)> {
+fn expand_fn(item: syn::ForeignItemFn) -> syn::Result<(Option<syn::Type>, TokenStream)> {
     let span = item.sig.ident.span();
-    let (mut attrs, rust_attrs) = Attrs::take_from(item.attrs)?;
-    attrs.inherit(outer);
+    let (attrs, rust_attrs) = Attrs::take_from(item.attrs)?;
 
     let sig = item.sig;
     let vis = item.vis;
@@ -166,30 +152,14 @@ fn expand_fn(
         _ => quote!(),
     };
 
-    let body = if let Some(module) = module {
-        let msg = format!("wasm-bindgen fake: JS module {module} is not available (fn {ident})");
-        let unused = args.iter().map(|(n, _)| quote!(let _ = #n;));
-        quote! { #(#unused)* ::core::panic!(#msg) }
-    } else if let Some(bad) = args.iter().find(|(_, t)| is_unsupported(t)) {
-        // Slice arguments (`&[T]`, `&mut [u8]`) have no `IntoJs` lowering.
-        // None occur in the enabled feature set; a stub keeps a crate that
-        // declares one compiling until it is actually called.
-        let msg = format!(
-            "wasm-bindgen fake: unsupported argument type on `{}` (argument `{}`)",
-            ident, bad.0,
-        );
-        let unused = args.iter().map(|(n, _)| quote!(let _ = #n;));
-        quote! { #(#unused)* ::core::panic!(#msg) }
+    let call = protocol_call(&recv, &op(&attrs, &ident)?, args, span)?;
+    let body = if attrs.has("catch") {
+        quote! { #call.map(::wasm_bindgen::__rt::FromJs::from_js) }
     } else {
-        let call = protocol_call(&recv, &op(&attrs, &ident)?, args, span)?;
-        if attrs.has("catch") {
-            quote! { #call.map(::wasm_bindgen::__rt::FromJs::from_js) }
-        } else {
-            quote! {
-                match #call {
-                    ::core::result::Result::Ok(__v) => ::wasm_bindgen::__rt::FromJs::from_js(__v),
-                    ::core::result::Result::Err(__e) => ::wasm_bindgen::__rt::uncaught(__e),
-                }
+        quote! {
+            match #call {
+                ::core::result::Result::Ok(__v) => ::wasm_bindgen::__rt::FromJs::from_js(__v),
+                ::core::result::Result::Err(__e) => ::wasm_bindgen::__rt::uncaught(__e),
             }
         }
     };
@@ -227,8 +197,22 @@ fn classify(
     }
     if let Some(owner) = attrs.string("static_method_of") {
         let ty: syn::Type = syn::parse_str(&owner)?;
-        let namespace = vec![attrs.string("js_class").unwrap_or(owner)];
-        return Ok(Recv::Static { ty, namespace });
+        // `parser.rs:1034` — `js_class` names the class, and failing that
+        // the LAST segment of the `static_method_of` path, not the whole
+        // path: `static_method_of = a::B` is `B` on the global.
+        let class = attrs
+            .string("js_class")
+            .or_else(|| last_segment(&ty))
+            .ok_or_else(|| {
+                syn::Error::new(
+                    ty.span(),
+                    "wasm-bindgen fake: cannot name this static's class",
+                )
+            })?;
+        return Ok(Recv::Static {
+            ty,
+            namespace: vec![class],
+        });
     }
     if attrs.has("method") {
         let Some((_, ty)) = inputs.first() else {
@@ -359,36 +343,13 @@ fn protocol_call(
         (Recv::Static { namespace, .. } | Recv::Free { namespace }, Op::Call(method)) => {
             quote! { ::wasm_bindgen::__rt::call_static(&[#(#namespace),*], #method, &[#(#lowered),*]) }
         }
-        // A static property (`static_method_of = "Notification", getter`).
-        // `__rt` has no helper for this, so the namespace walk is inline.
-        (Recv::Static { namespace, .. } | Recv::Free { namespace }, op) => {
-            let walk = quote! {
-                let __recv = ::wasm_bindgen::__rt::global();
-                #( let __recv = ::wasm_bindgen::JsValue::get_prop(&__recv, #namespace)?; )*
-            };
-            let tail = match op {
-                Op::Get(property) => {
-                    arity(0, "a getter")?;
-                    quote!(::wasm_bindgen::JsValue::get_prop(&__recv, #property))
-                }
-                Op::Set(property) => {
-                    arity(1, "a setter")?;
-                    let v = &lowered[0];
-                    quote!(::wasm_bindgen::JsValue::set_prop(&__recv, #property, #v) #ok_unit)
-                }
-                _ => {
-                    return Err(syn::Error::new(
-                        span,
-                        "wasm-bindgen fake: an indexing binding needs a `this` receiver",
-                    ))
-                }
-            };
-            quote! {
-                (|| -> ::core::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
-                    #walk
-                    #tail
-                })()
-            }
+        // Every other operation reads or writes a property, which needs a
+        // receiver that a static or free binding does not have.
+        (Recv::Static { .. } | Recv::Free { .. }, _) => {
+            return Err(syn::Error::new(
+                span,
+                "wasm-bindgen fake: a property binding needs a `this` receiver",
+            ))
         }
     })
 }
@@ -398,16 +359,6 @@ fn strip_ref(ty: &syn::Type) -> &syn::Type {
     match ty {
         syn::Type::Reference(r) => strip_ref(&r.elem),
         other => other,
-    }
-}
-
-/// Slices have no `IntoJs` lowering; the caller stubs such a binding out.
-fn is_unsupported(ty: &syn::Type) -> bool {
-    match ty {
-        syn::Type::Slice(_) | syn::Type::Array(_) => true,
-        syn::Type::Reference(r) => is_unsupported(&r.elem),
-        syn::Type::Path(p) => inner_of(p, "Option").is_some_and(is_unsupported),
-        _ => false,
     }
 }
 

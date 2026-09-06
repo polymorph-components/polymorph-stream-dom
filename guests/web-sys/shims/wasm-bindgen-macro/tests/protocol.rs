@@ -170,6 +170,15 @@ extern "C" {
     #[wasm_bindgen(method, js_name = "setAttribute", is_type_of = |_| false)]
     pub fn set_attribute(this: &Widget, name: &str, value: &str);
 
+    /// `catch` combined with `getter` — the `Window.innerWidth` shape
+    /// (`gen_Window.rs`): the property read still happens, and a throw
+    /// reaches the caller instead of aborting.
+    #[wasm_bindgen(catch, method, getter, js_name = "innerWidth")]
+    pub fn inner_width(this: &Widget) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(catch, method, setter, js_name = "innerWidth")]
+    pub fn set_inner_width(this: &Widget, value: u32) -> Result<(), JsValue>;
+
     #[wasm_bindgen(catch, method, js_name = "query")]
     pub fn query(this: &Widget, selector: &str) -> Result<Option<Widget>, JsValue>;
 
@@ -188,18 +197,19 @@ extern "C" {
     #[wasm_bindgen(catch, constructor, js_class = "Widget")]
     pub fn new(kind: &str) -> Result<Widget, JsValue>;
 
-    #[wasm_bindgen(static_method_of = Widget, js_class = "Widget", js_name = "isSupported")]
+    /// No `js_class`, and a multi-segment `static_method_of`: the class
+    /// is the path's LAST segment (`parser.rs:1034`), so this reads
+    /// `globalThis.Widget`, not `globalThis["nested::Widget"]`.
+    #[wasm_bindgen(static_method_of = nested::Widget, js_name = "isSupported")]
     pub fn is_supported(kind: &str) -> String;
 
     #[wasm_bindgen(js_namespace = "console", js_name = "log")]
     pub fn console_log(message: &str) -> String;
 }
 
-/// An `extern` block behind a JS module: declared, but not callable.
-#[wasm_bindgen(module = "/js/helpers.js")]
-extern "C" {
-    #[wasm_bindgen(js_name = "helper")]
-    pub fn helper(x: u32) -> u32;
+/// Only here to give `static_method_of` a multi-segment path to resolve.
+mod nested {
+    pub use super::Widget;
 }
 
 /// A string enum, as `gen_ScrollBehavior.rs:9`.
@@ -325,6 +335,35 @@ fn catch_surfaces_a_throw_and_its_absence_panics() {
 }
 
 #[test]
+fn catch_composes_with_getter_and_setter() {
+    let rec = install();
+    rec.reply("innerWidth", JsValue::from_f64(1024.0));
+    let w = widget(&rec);
+
+    assert_eq!(w.inner_width(), Ok(JsValue::from_f64(1024.0)));
+    assert_eq!(w.set_inner_width(800), Ok(()));
+
+    rec.throw("innerWidth");
+    assert_eq!(
+        w.inner_width(),
+        Err(JsValue::from_str("thrown by innerWidth"))
+    );
+    assert_eq!(
+        w.set_inner_width(640),
+        Err(JsValue::from_str("thrown by innerWidth"))
+    );
+    assert_eq!(
+        rec.log(),
+        [
+            "get innerWidth",
+            "set innerWidth = 800",
+            "get innerWidth",
+            "set innerWidth = 640",
+        ]
+    );
+}
+
+#[test]
 fn a_wrapper_return_lifts_through_the_protocol() {
     let rec = install();
     rec.reply("query", JsValue::from_object(rec.clone()));
@@ -351,7 +390,7 @@ fn a_constructor_calls_the_global_of_that_class() {
 #[test]
 fn statics_and_namespaced_free_functions_walk_the_global() {
     let rec = install();
-    assert_eq!(Widget::is_supported("button"), "static");
+    assert_eq!(nested::Widget::is_supported("button"), "static");
     assert_eq!(console_log("hello"), "static");
     assert_eq!(
         rec.log(),
@@ -394,14 +433,6 @@ fn extends_gives_deref_and_asref_up_the_chain() {
     assert!(<Widget as JsCast>::instanceof(v));
     assert!(<Base as JsCast>::instanceof(v));
     assert_eq!(rec.log(), ["invoke describe[]"]);
-}
-
-#[test]
-fn a_module_backed_binding_panics_naming_the_module() {
-    let err = std::panic::catch_unwind(|| helper(1)).expect_err("no JS module is loadable");
-    let msg = err.downcast_ref::<&str>().expect("&str payload");
-    assert!(msg.contains("/js/helpers.js"), "{msg}");
-    assert!(msg.contains("helper"), "{msg}");
 }
 
 #[test]

@@ -1,5 +1,6 @@
-# The shadow DOM behind the `web-sys` shim, and the `polymorph:stream-dom`
-# producer driver that turns its mutations into `Frame`s.
+# The shadow DOM the real `web_sys` drives through the `JsObject` protocol,
+# and the `polymorph:stream-dom` producer driver that turns its mutations
+# into `Frame`s.
 [package]
 name = "stream-dom-fakedom"
 version = "0.1.0"

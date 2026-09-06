@@ -159,8 +159,6 @@ pub struct JsValue(Inner);
 impl JsValue {
     pub const UNDEFINED: JsValue = JsValue(Inner::Undefined);
     pub const NULL: JsValue = JsValue(Inner::Null);
-    pub const TRUE: JsValue = JsValue(Inner::Bool(true));
-    pub const FALSE: JsValue = JsValue(Inner::Bool(false));
 
     // The real crate's name; changing it would break every caller.
     #[allow(clippy::should_implement_trait)]
@@ -213,23 +211,6 @@ impl JsValue {
         matches!(self.0, Inner::Null)
     }
 
-    pub fn is_object(&self) -> bool {
-        matches!(self.0, Inner::Object(_))
-    }
-
-    pub fn is_string(&self) -> bool {
-        matches!(self.0, Inner::String(_))
-    }
-
-    /// An object whose `class_chain` names `"Function"` — the shim's
-    /// whole notion of callability.
-    pub fn is_function(&self) -> bool {
-        match &self.0 {
-            Inner::Object(o) => o.class_chain().contains(&"Function"),
-            _ => false,
-        }
-    }
-
     #[doc(hidden)]
     pub fn class_chain(&self) -> Option<&[&'static str]> {
         match &self.0 {
@@ -238,9 +219,9 @@ impl JsValue {
         }
     }
 
-    /// Downcast to the concrete Rust type behind an object. The seam the
-    /// other shims (`js-sys`, `web-sys`) use to reach the fake DOM's
-    /// nodes; not part of the real `wasm-bindgen` API.
+    /// Downcast to the concrete Rust type behind an object. The seam
+    /// `js-sys` and the fake DOM use to reach their own nodes; not part
+    /// of the real `wasm-bindgen` API.
     #[doc(hidden)]
     pub fn downcast_ref<T: JsObject + 'static>(&self) -> Option<&T> {
         match &self.0 {

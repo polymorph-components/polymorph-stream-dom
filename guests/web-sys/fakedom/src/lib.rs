@@ -47,7 +47,7 @@ pub use stream_dom_guest::bindings;
 ///
 /// ```ignore
 /// stream_dom_fakedom::launch!(mount);
-/// fn mount() { /* build the DOM under `mount_root_node()` */ }
+/// fn mount() { /* build the DOM under `document().body()` */ }
 /// ```
 #[cfg(target_arch = "wasm32")]
 #[macro_export]

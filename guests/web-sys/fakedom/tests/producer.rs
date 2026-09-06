@@ -69,10 +69,10 @@ fn assert_define_before_use(frames: &[proto::Frame]) {
     let mut nodes: Vec<u32> = vec![0];
     let mut slots: Vec<u32> = Vec::new();
 
-    let mut used_node = |nodes: &[u32], id: u32, what: &str| {
+    let used_node = |nodes: &[u32], id: u32, what: &str| {
         assert!(nodes.contains(&id), "{what} names uncreated node id {id}");
     };
-    let mut used_slot = |slots: &[u32], r: u32, what: &str| {
+    let used_slot = |slots: &[u32], r: u32, what: &str| {
         assert!(slots.contains(&r), "{what} names undefined str-ref {r}");
     };
 
@@ -132,7 +132,7 @@ fn assert_single_trailing_commit(frames: &[proto::Frame]) {
     }
 }
 
-fn attribute_writes<'a>(frames: &'a [proto::Frame], name_slot: u32) -> Vec<Option<&'a str>> {
+fn attribute_writes(frames: &[proto::Frame], name_slot: u32) -> Vec<Option<&str>> {
     frames
         .iter()
         .filter_map(|f| match &f.op {
@@ -205,7 +205,7 @@ fn a_small_tree_produces_a_well_formed_batch() {
     let listener = frames
         .iter()
         .find_map(|f| match &f.op {
-            Some(Op::AddListener(l)) => l.listener.clone(),
+            Some(Op::AddListener(l)) => l.listener,
             _ => None,
         })
         .expect("an add-listener frame");

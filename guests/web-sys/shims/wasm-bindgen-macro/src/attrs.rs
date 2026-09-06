@@ -84,13 +84,18 @@ impl Attrs {
         Ok((Attrs { entries }, rest))
     }
 
-    /// Attributes on the enclosing `extern "C"` block act as defaults;
-    /// an item that names the same key overrides it (`self` wins).
-    pub fn inherit(&mut self, outer: &Attrs) {
-        for (k, v) in &outer.entries {
-            if !self.has(&k.to_string()) {
-                self.entries.push((k.clone(), v.clone()));
-            }
+    /// Refuse an attribute list in a position that has no use for one.
+    /// `#[wasm_bindgen]` on an `extern "C"` block is bare throughout
+    /// web-sys 0.3.105 -- every argument is on the items inside -- so a
+    /// block-level argument is something this macro has never had to
+    /// interpret, and guessing is worse than saying so.
+    pub fn reject_arguments(&self, position: &str) -> syn::Result<()> {
+        match self.entries.first() {
+            None => Ok(()),
+            Some((key, _)) => Err(syn::Error::new(
+                key.span(),
+                format!("wasm-bindgen fake: `{key}` is not supported on {position}"),
+            )),
         }
     }
 

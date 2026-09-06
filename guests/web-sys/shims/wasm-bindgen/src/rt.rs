@@ -387,7 +387,7 @@ mod tests {
         assert!(std::panic::catch_unwind(|| bool::from_js(JsValue::from_f64(1.0))).is_err());
         assert!(std::panic::catch_unwind(|| f64::from_js(JsValue::from_str("1"))).is_err());
         assert!(std::panic::catch_unwind(|| u32::from_js(JsValue::UNDEFINED)).is_err());
-        assert!(bool::from_js(JsValue::TRUE));
+        assert!(bool::from_js(JsValue::from_bool(true)));
         assert_eq!(f64::from_js(JsValue::from_f64(1.5)), 1.5);
     }
 
@@ -408,7 +408,10 @@ mod tests {
             Some("x".to_string())
         );
         // Strictness survives the Option wrapper.
-        assert!(std::panic::catch_unwind(|| Option::<String>::from_js(JsValue::TRUE)).is_err());
+        assert!(
+            std::panic::catch_unwind(|| Option::<String>::from_js(JsValue::from_bool(true)))
+                .is_err()
+        );
         // And `None` lowers back to `undefined`, not `null`.
         assert!(None::<&str>.into_js().is_undefined());
     }
@@ -427,7 +430,7 @@ mod tests {
         obj.set_prop("a", JsValue::from_f64(3.0)).unwrap();
         assert_eq!(obj.get_prop("a").unwrap(), JsValue::from_f64(3.0));
         assert_eq!(obj.get_prop("b").unwrap(), JsValue::from_str("two"));
-        assert!(obj.is_object() && !obj.is_function());
+        assert!(obj.downcast_ref::<PlainObject>().is_some());
     }
 
     #[test]
