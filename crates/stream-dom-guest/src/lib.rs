@@ -421,6 +421,7 @@ mod tests {
         let div = interner.intern("div", &mut b);
         let click = interner.intern("click", &mut b);
         let class = interner.intern("class", &mut b);
+        let hashchange = interner.intern("hashchange", &mut b);
 
         b.create_element(1, div, None);
         b.create_text(2, "hello");
@@ -435,9 +436,23 @@ mod tests {
         b.insert_before(None, 4, Some(3));
         b.set_attribute(1, class, None, Some("greeting"));
         b.add_listener(proto::Listener {
-            id: 1,
+            target: Some(proto::listener::Target::Id(1)),
             name: click,
             bubbles: true,
+            capture: false,
+            passive: false,
+            prevent_default: false,
+            stop_propagation: false,
+        });
+        // The other arm of `Listener.target`, so the TS decoder's
+        // cross-check covers the oneof and not just node ids. Globals are
+        // attached directly, hence `bubbles: false`.
+        b.add_listener(proto::Listener {
+            target: Some(proto::listener::Target::Global(
+                proto::Global::Window as i32,
+            )),
+            name: hashchange,
+            bubbles: false,
             capture: false,
             passive: false,
             prevent_default: false,

@@ -46,6 +46,16 @@ impl Verdict {
     }
 }
 
+/// What an incoming event names. Mirrors the WIT `event-target` variant
+/// (wit/stream-dom.wit) without naming the bindings, so dispatch stays
+/// target-independent and the native tests can drive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Node(stream_dom_guest::NodeId),
+    Window,
+    Document,
+}
+
 pub struct EventData {
     pub name: String,
     pub payload: proto::EventPayload,
@@ -84,6 +94,9 @@ fn class_chain_for(name: &str) -> &'static [&'static str] {
         "keydown" | "keyup" | "keypress" => &["KeyboardEvent", UI, EVENT, "Object"],
         "input" | "beforeinput" => &["InputEvent", UI, EVENT, "Object"],
         "focus" | "blur" | "focusin" | "focusout" => &["FocusEvent", UI, EVENT, "Object"],
+        // The two global navigation events. Neither is a UIEvent.
+        "hashchange" => &["HashChangeEvent", EVENT, "Object"],
+        "popstate" => &["PopStateEvent", EVENT, "Object"],
         n if n.starts_with("touch") => &["TouchEvent", UI, EVENT, "Object"],
         n if n.starts_with("animation") => &["AnimationEvent", EVENT, "Object"],
         "resize" => &[UI, EVENT, "Object"],
@@ -159,6 +172,16 @@ impl EventData {
         }
     }
 
+    /// `location.href` after the navigation. The receiver snapshots it
+    /// because a producer has no `location` to read
+    /// (proto/stream-dom-events.proto, `NavigationData`).
+    pub fn navigation_href(&self) -> &str {
+        match &self.payload.family {
+            Some(proto::event_payload::Family::Navigation(n)) => &n.href,
+            _ => self.family_mismatch("navigation"),
+        }
+    }
+
     pub fn modifiers(&self) -> proto::Modifiers {
         match &self.payload.family {
             Some(proto::event_payload::Family::Keyboard(k)) => k.modifiers.unwrap_or_default(),
@@ -186,15 +209,21 @@ impl JsObject for EventData {
 /// Returns `false` when the event was dropped because its target id is
 /// unknown — a node removed while the event was already in flight on the
 /// reverse channel, which the protocol says to drop
-/// (proto/stream-dom.proto file header).
+/// (proto/stream-dom.proto file header). A global target always resolves:
+/// `window` and `document` are singletons that always exist.
 pub fn dispatch(
-    target: stream_dom_guest::NodeId,
+    target: Target,
     name: &str,
     payload: proto::EventPayload,
     verdict: Rc<Verdict>,
 ) -> bool {
-    let Some(target_node) = dom::node_by_id(target) else {
-        return false;
+    let (target_node, global) = match target {
+        Target::Node(id) => match dom::node_by_id(id) {
+            Some(n) => (n, false),
+            None => return false,
+        },
+        Target::Window => (dom::window_node(), true),
+        Target::Document => (dom::document_node(), true),
     };
 
     // The DOM updates a control's `value` / `checked` before firing the
@@ -209,7 +238,7 @@ pub fn dispatch(
         }
     }
 
-    let bubbles = crate::dom::name_bubbles(name);
+    let bubbles = !global && crate::dom::name_bubbles(name);
     let event = Rc::new(EventData {
         name: name.to_string(),
         payload,
@@ -224,6 +253,20 @@ pub fn dispatch(
     });
     let event_value = JsValue::from_object(event.clone());
 
+    if global {
+        // A global listener is attached directly, so there is no tree to
+        // walk: `window` and `document` are not in the mount and have no
+        // ancestors here. This is the DOM's AT_TARGET phase, where capture
+        // *and* bubble listeners both run -- which matters, because
+        // dominator's `global_event` registers in the capture phase
+        // (`EventOptions::bubbles = false` maps to
+        // `EventListenerPhase::Capture`, dominator-0.5.38/src/dom.rs:752).
+        // Firing only the non-capture ones would silently drop every
+        // global listener a Dominator app has.
+        fire(&target_node, name, Phase::AtTarget, &event, &event_value);
+        return true;
+    }
+
     // Nearest-first, so the capture walk is this reversed.
     let path = target_node.ancestor_path();
 
@@ -231,13 +274,13 @@ pub fn dispatch(
         if event.stopped.get() {
             return true;
         }
-        fire(node, name, true, &event, &event_value);
+        fire(node, name, Phase::Capture, &event, &event_value);
     }
     for node in path.iter() {
         if event.stopped.get() {
             return true;
         }
-        fire(node, name, false, &event, &event_value);
+        fire(node, name, Phase::Bubble, &event, &event_value);
         if !bubbles {
             break;
         }
@@ -245,10 +288,30 @@ pub fn dispatch(
     true
 }
 
+/// Which listeners a pass over a node invokes.
+#[derive(Clone, Copy)]
+enum Phase {
+    Capture,
+    Bubble,
+    /// The event's target is the node itself, so there is no propagation
+    /// and both kinds run.
+    AtTarget,
+}
+
+impl Phase {
+    fn wants(self, capture: bool) -> bool {
+        match self {
+            Phase::Capture => capture,
+            Phase::Bubble => !capture,
+            Phase::AtTarget => true,
+        }
+    }
+}
+
 fn fire(
     node: &Rc<NodeData>,
     name: &str,
-    capture: bool,
+    phase: Phase,
     event: &Rc<EventData>,
     event_value: &JsValue,
 ) {
@@ -257,7 +320,7 @@ fn fire(
     let callbacks: Vec<JsValue> = node
         .listeners()
         .iter()
-        .filter(|l| l.name == name && l.capture == capture)
+        .filter(|l| l.name == name && phase.wants(l.capture))
         .map(|l| l.callback.clone())
         .collect();
     if callbacks.is_empty() {

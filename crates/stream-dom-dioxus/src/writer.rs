@@ -251,6 +251,35 @@ impl MutationWriter {
         self.stack.split_off(at)
     }
 
+    /// The registration Dioxus's add/remove listener pair share.
+    ///
+    /// The target is always a node: `Listener.target`'s other case, `Global`
+    /// (`window` / `document`), has no Dioxus counterpart. `WriteMutations`
+    /// only ever names an `ElementId`, and dioxus-html's global-ish events
+    /// (`onresize`, `onvisible`) are receiver-synthesized per element, not
+    /// window registrations. A Dioxus producer therefore never emits a
+    /// `Global` listener — see docs/design.md "Events" → global listeners,
+    /// where the frameworks that do need them are Dominator and Leptos.
+    fn listener(&mut self, name: &'static str, id: ElementId) -> proto::Listener {
+        let nid = self.node(id);
+        let slot = self.intern(name);
+        proto::Listener {
+            target: Some(proto::listener::Target::Id(nid)),
+            name: slot,
+            // The receiver delegates bubbling events at the mount root and
+            // attaches non-bubbling ones per element, so it needs the
+            // producer's verdict (proto/stream-dom.proto `Listener`).
+            bubbles: dioxus_core_types::event_bubbles(name),
+            capture: false,
+            passive: false,
+            // Dioxus handlers call `prevent_default` imperatively, which the
+            // driver relays through `dom-event`; there is no declarative
+            // verdict to publish at registration time.
+            prevent_default: false,
+            stop_propagation: false,
+        }
+    }
+
     /// Insert `nodes` before `anchor`, which implies the parent on the wire.
     fn insert_before(&mut self, nodes: &[NodeId], anchor: NodeId) {
         let owner = self.owner_of(anchor);
@@ -628,37 +657,13 @@ impl WriteMutations for MutationWriter {
     }
 
     fn create_event_listener(&mut self, name: &'static str, id: ElementId) {
-        let nid = self.node(id);
-        let slot = self.intern(name);
-        self.batch.add_listener(proto::Listener {
-            id: nid,
-            name: slot,
-            // The receiver delegates bubbling events at the mount root and
-            // attaches non-bubbling ones per element, so it needs the
-            // producer's verdict (proto/stream-dom.proto `Listener`).
-            bubbles: dioxus_core_types::event_bubbles(name),
-            capture: false,
-            passive: false,
-            // Dioxus handlers call `prevent_default` imperatively, which the
-            // driver relays through `dom-event`; there is no declarative
-            // verdict to publish at registration time.
-            prevent_default: false,
-            stop_propagation: false,
-        });
+        let l = self.listener(name, id);
+        self.batch.add_listener(l);
     }
 
     fn remove_event_listener(&mut self, name: &'static str, id: ElementId) {
-        let nid = self.node(id);
-        let slot = self.intern(name);
-        self.batch.remove_listener(proto::Listener {
-            id: nid,
-            name: slot,
-            bubbles: dioxus_core_types::event_bubbles(name),
-            capture: false,
-            passive: false,
-            prevent_default: false,
-            stop_propagation: false,
-        });
+        let l = self.listener(name, id);
+        self.batch.remove_listener(l);
     }
 
     fn remove_node(&mut self, id: ElementId) {

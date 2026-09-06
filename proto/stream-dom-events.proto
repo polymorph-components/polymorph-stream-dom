@@ -289,6 +289,16 @@ message FrameData {
 }
 
 // Families ordered roughly by frequency; all tags are one byte.
+// `popstate` and `hashchange` on `window`. The only reason to listen to
+// either is to learn where the document now is, and a producer has no
+// `location` to read, so the receiver snapshots it. (HashChangeEvent
+// carries newURL itself; PopStateEvent carries only `state`, so the
+// snapshot is uniform rather than per-event.)
+message NavigationData {
+  // location.href after the navigation.
+  string href = 1;
+}
+
 message EventPayload {
   oneof family {
     MouseData mouse = 1;
@@ -304,5 +314,6 @@ message EventPayload {
     TransitionData transition = 11;
     ResizeData resize = 12;
     VisibleData visible = 13;
+    NavigationData navigation = 14;
   }
 }

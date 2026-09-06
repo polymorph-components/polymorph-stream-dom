@@ -526,6 +526,24 @@ Delegation: bubbling events are delegated at the mount root; non-bubbling
 ones are attached per element. The listener op carries the `bubbles` bit
 so removal can find the registration.
 
+Global listeners: a listener's target is a node id *or* one of two
+receiver-side singletons, `window` and `document` (`Listener.target` is a
+`oneof`; `handle-event`'s target is the matching WIT variant). Frameworks
+register `popstate`, `hashchange`, window `resize`, `visibilitychange`,
+media-query and global keyboard listeners there — Dominator's
+`global_event` and its `routing` module, Leptos's `window_event_listener`
+— and nothing under the mount root can stand in for them. The first spike
+had no way to express these and the shim panicked on them. Reserved node
+ids were the alternative; a `oneof` is self-describing and keeps the id
+space purely producer-allocated. Globals are always attached directly.
+`popstate`/`hashchange` carry the `navigation` family (`location.href`
+after the navigation), since learning the URL is the only reason to listen
+and the producer has no `location` to read. For the same reason the
+receiver fires one synthetic `hashchange`/`popstate` after the commit that
+first registers a window listener for it: the producer cannot read the
+initial URL, so a deep link would otherwise render the default route until
+the first real navigation. Same shape as synthetic `mounted`.
+
 `preventDefault` is the one genuinely hard part across an async boundary,
 because every framework lets the handler call it imperatively. Options:
 
@@ -864,12 +882,12 @@ moving the anchor back in front of them, one extra move per keyed-list
 append; `insert-after` is now an op. Both are recorded under "Every op is
 addressable and self-contained".
 
-**`window` and `document` are not addressable.** Dominator's routing
+**`window` and `document` were not addressable.** Dominator's routing
 (`popstate` on `window`) and media queries register listeners on nodes the
-protocol cannot name; the shim panics rather than emit a listener for an
-undefined id. Framework-level global listeners (`resize`, `popstate`,
-`visibilitychange`, media queries) have nowhere to go; the `resize`
-synthetic covers one. Open question 13.
+protocol could not name; the shim panicked rather than emit a listener for
+an undefined id. Fixed by making a listener's target a node id or a
+global (see "Events"); the Dominator demo's filters are hash links driven
+by a window `hashchange` listener.
 
 **Fine-grained commit boundaries fell out of the scheduler.** Dominator's
 signals run in spawned futures; the shim sets a dirty flag on every
@@ -984,10 +1002,3 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
     namespaces, imperative `preventDefault` and the wasm-native path —
     sufficient, but the record should then say so instead of leaning on
     mount cost.
-13. **Global listeners.** `window` and `document` have no id, so
-    framework-level `popstate`, `visibilitychange`, window `resize` and
-    media-query listeners cannot be registered. Options: reserve ids for
-    `window`/`document` (they are receiver-side singletons a producer can
-    name without creating), or more synthetic families on the mount root
-    like `resize`. The reserved-id shape is the smaller change and matches
-    how `0` already names the mount root.

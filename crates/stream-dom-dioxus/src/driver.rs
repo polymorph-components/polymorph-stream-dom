@@ -58,12 +58,12 @@ use std::task::Context;
 use dioxus_core::{Element, Event, Runtime, VirtualDom};
 use dioxus_core_types::event_bubbles;
 use dioxus_html::PlatformEventData;
-use stream_dom_guest::{channel, Interner, NodeId, StrRef};
+use stream_dom_guest::{channel, Interner, StrRef};
 use wit_bindgen::rt::async_support::{spawn_local, StreamReader};
 
 use crate::events::{StreamEventConverter, StreamEventData};
 use crate::writer::MutationWriter;
-use stream_dom_guest::bindings::DomEvent;
+use stream_dom_guest::bindings::{DomEvent, EventTarget};
 
 /// The read end of the mutation channel: what `run` hands back. Named here so
 /// [`crate::launch!`] can spell the export's return type without the app
@@ -163,10 +163,17 @@ pub async fn run(root: fn() -> Element, hydrate: bool) -> MutationStream {
 /// we render and flush whatever the handlers dirtied, then — still before
 /// returning, i.e. still inside the receiver's DOM listener frame — call
 /// `ev.prevent-default()` if a handler asked for it.
-pub async fn handle_event(target: NodeId, name: StrRef, payload: Vec<u8>, ev: &DomEvent) {
+pub async fn handle_event(target: EventTarget, name: StrRef, payload: Vec<u8>, ev: &DomEvent) {
     if channel::is_dead() {
         return;
     }
+    // Dioxus registers nothing on `window` or `document`: `WriteMutations`
+    // only ever names an `ElementId`, so this producer never emits a
+    // `Listener` with a `Global` target and a global dispatch can only be a
+    // receiver bug or another producer's event (docs/design.md "Events").
+    let EventTarget::Node(target) = target else {
+        return;
+    };
     // The receiver cannot have a listener registration before `run` mounted
     // the app, but a defensive early return beats a trap if it ever races.
     let Some(interner) = INTERNER.with_borrow(|i| i.clone()) else {

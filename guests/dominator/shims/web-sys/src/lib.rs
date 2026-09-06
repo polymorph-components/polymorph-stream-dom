@@ -66,6 +66,8 @@ wrapper_type!(InputEvent, "InputEvent", extends: UiEvent, Event, js_sys::Object)
 wrapper_type!(FocusEvent, "FocusEvent", extends: UiEvent, Event, js_sys::Object);
 wrapper_type!(TouchEvent, "TouchEvent", extends: UiEvent, Event, js_sys::Object);
 wrapper_type!(AnimationEvent, "AnimationEvent", extends: Event, js_sys::Object);
+wrapper_type!(HashChangeEvent, "HashChangeEvent", extends: Event, js_sys::Object);
+wrapper_type!(PopStateEvent, "PopStateEvent", extends: Event, js_sys::Object);
 
 wrapper_type!(TouchList, "TouchList", extends: js_sys::Object);
 wrapper_type!(Touch, "Touch", extends: js_sys::Object);
@@ -876,6 +878,28 @@ impl AnimationEvent {
         }
     }
 }
+
+// The two global navigation events. Both carry the `navigation` family,
+// whose single field is `location.href` after the navigation: the
+// receiver snapshots it because a producer has no `location` to read
+// (proto/stream-dom-events.proto, `NavigationData`).
+
+impl HashChangeEvent {
+    pub fn new_url(&self) -> String {
+        event_of(self).navigation_href().to_string()
+    }
+
+    /// The URL *before* the navigation is not in the payload: nothing
+    /// needs it that could not keep its own last value, and adding it
+    /// would make the receiver track history to answer.
+    pub fn old_url(&self) -> String {
+        String::new()
+    }
+}
+
+// `PopStateEvent` carries only `state` in the DOM, which is a live JS
+// value the protocol does not marshal; the `href` snapshot is read through
+// the payload, so the type exists purely to be cast to.
 
 impl WheelEvent {
     pub fn delta_x(&self) -> f64 {

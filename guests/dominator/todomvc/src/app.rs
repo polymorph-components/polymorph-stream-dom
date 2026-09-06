@@ -1,15 +1,45 @@
 //! Dominator's TodoMVC `app.rs`. Changes from the original are marked
 //! with `PORT:`; see the crate docs for why.
 
+use dominator::traits::StaticEvent;
 use dominator::{clone, events, html, text_signal, with_node, Dom, EventOptions};
 use futures_signals::signal::{Mutable, Signal, SignalExt};
 use futures_signals::signal_vec::{MutableVec, SignalVec, SignalVecExt};
 use std::cell::Cell;
 use std::sync::Arc;
+use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
 use crate::todo::Todo;
 use crate::util::trim;
+
+/// PORT: `dominator::events` has no `hashchange`, so here is the same
+/// `StaticEvent` impl its own macros generate (mirrors
+/// dominator-0.5.38/src/events.rs `make_event!` + `static_event_impl!`).
+/// This is what makes the filter links ordinary `<a href="#/...">` again:
+/// the browser changes the hash, the receiver reports it, and the app
+/// reads it here.
+pub struct HashChange {
+    event: web_sys::HashChangeEvent,
+}
+
+impl HashChange {
+    #[inline]
+    pub fn new_url(&self) -> String {
+        self.event.new_url()
+    }
+}
+
+impl StaticEvent for HashChange {
+    const EVENT_TYPE: &'static str = "hashchange";
+
+    #[inline]
+    fn unchecked_from_event(event: web_sys::Event) -> Self {
+        Self {
+            event: event.unchecked_into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -19,6 +49,16 @@ pub enum Route {
 }
 
 impl Route {
+    /// PORT: the original used `web_sys::Url`, which a producer has no
+    /// business owning. The hash suffix is all TodoMVC's routes are.
+    pub fn from_url(url: &str) -> Self {
+        match url.rfind('#').map(|i| &url[i..]) {
+            Some("#/active") => Route::Active,
+            Some("#/completed") => Route::Completed,
+            _ => Route::All,
+        }
+    }
+
     pub fn to_url(&self) -> &'static str {
         match self {
             Route::Active => "#/active",
@@ -30,9 +70,11 @@ impl Route {
 
 impl Default for Route {
     fn default() -> Self {
-        // PORT: the original derived this from `routing::url()`. A
-        // producer has no address bar; the filter links below set the
-        // route directly.
+        // PORT: the original read the current URL at startup. A producer
+        // has no `location` and the protocol has no read for it, so the
+        // initial route is `All` and the first `hashchange` corrects it.
+        // A receiver could close this by firing a synthetic `hashchange`
+        // after the mount commits.
         Route::All
     }
 }
@@ -186,9 +228,10 @@ impl App {
         })
     }
 
-    // PORT: was `link!`, which routes through `history.pushState`. The
-    // `<a href>` is kept so the markup and the todomvc CSS are unchanged;
-    // the click is cancelled and sets the route directly instead.
+    // PORT: was `link!`, which routes through `history.pushState`. A plain
+    // `<a href="#/...">` instead: the browser changes the hash itself and
+    // the window `hashchange` listener on the root builder picks it up, so
+    // there is no click handler at all.
     fn render_button(app: &Arc<Self>, text: &str, route: Route) -> Dom {
         html!("li", {
             .children(&mut [
@@ -196,10 +239,6 @@ impl App {
                     .attr("href", route.to_url())
                     .text(text)
                     .class_signal("selected", app.route().map(move |x| x == route))
-                    .event_with_options(&EventOptions::preventable(), clone!(app => move |e: events::Click| {
-                        e.prevent_default();
-                        app.route.set_neq(route);
-                    }))
                 })
             ])
         })
@@ -260,7 +299,14 @@ impl App {
         html!("section", {
             .class("todoapp")
 
-            // PORT: the original tracked the URL here.
+            // PORT: the original subscribed to `routing::url()`. This is
+            // the same thing one layer down -- a `hashchange` listener on
+            // `window`, registered through Dominator's own `global_event`,
+            // which the protocol now carries as a `Global(WINDOW)`
+            // listener target.
+            .global_event(clone!(app => move |e: HashChange| {
+                app.route.set_neq(Route::from_url(&e.new_url()));
+            }))
 
             .children(&mut [
                 Self::render_header(app.clone()),
