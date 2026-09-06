@@ -14,7 +14,7 @@ fn js<T: AsRef<JsValue>>(v: &T) -> &JsValue {
     v.as_ref()
 }
 
-wrapper_type!(Object, "Object");
+wrapper_type!(pub Object, "Object");
 
 impl Object {
     /// `{}` — a fresh empty property bag.
@@ -29,9 +29,28 @@ impl Default for Object {
     }
 }
 
-wrapper_type!(Function, "Function", extends: Object);
+wrapper_type!(pub Function, "Function", extends: Object);
 
-wrapper_type!(JsString, "String", extends: Object);
+/// `globalThis`. The seam `web_sys::window()` goes through
+/// (`web-sys-0.3.105/src/lib.rs:38`), and so the entry point to the whole
+/// fake DOM: whatever object was passed to
+/// `wasm_bindgen::__rt::install_global` is what `Window` is cast from.
+pub fn global() -> Object {
+    Object::from(wasm_bindgen::__rt::global())
+}
+
+// Named only in `web_sys` signatures the enabled features happen to
+// declare -- `Element::get_animations`, `Window::fetch_with_str`,
+// `Node::get_root_node`, `Document::last_modified` and friends. None of
+// them is called by dominator, gloo-events or the todomvc port, so these
+// carry no methods: the types have to exist for `web_sys` to compile, and
+// nothing more.
+wrapper_type!(pub Array, "Array", extends: Object);
+wrapper_type!(pub Date, "Date", extends: Object);
+wrapper_type!(pub Iterator, "Iterator", extends: Object);
+wrapper_type!(pub Promise, "Promise", extends: Object);
+
+wrapper_type!(pub JsString, "String", extends: Object);
 
 impl fmt::Display for JsString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -42,7 +61,7 @@ impl fmt::Display for JsString {
     }
 }
 
-wrapper_type!(Error, "Error", extends: Object);
+wrapper_type!(pub Error, "Error", extends: Object);
 
 impl Error {
     /// The real one reads the `message` property. Errors produced by this

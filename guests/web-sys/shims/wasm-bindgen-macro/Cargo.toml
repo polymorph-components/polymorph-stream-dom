@@ -1,0 +1,28 @@
+# A hand-written stand-in for `wasm-bindgen-macro`: the `#[wasm_bindgen]`
+# proc macro, rewriting `extern "C"` binding blocks onto the `JsObject`
+# dispatch protocol in `../wasm-bindgen` instead of a wasm ABI boundary.
+#
+# It exists so the *real* `web-sys` 0.3.105 from crates.io compiles against
+# the fakes. Nothing depends on this crate by name -- it is reached only
+# through `wasm_bindgen::wasm_bindgen`, so it needs no `[patch.crates-io]`
+# entry and the version is free.
+[package]
+name = "wasm-bindgen-macro"
+version = "0.2.128"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+# A dev-dependency cycle back onto the crate that re-exports this macro.
+# Cargo allows it, and it is the only way to test the generated code
+# through the protocol it dispatches on rather than by matching tokens.
+[dev-dependencies]
+wasm-bindgen = { path = "../wasm-bindgen" }

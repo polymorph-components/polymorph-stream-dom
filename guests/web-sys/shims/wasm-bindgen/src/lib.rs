@@ -38,6 +38,8 @@ pub mod __rt;
 pub mod closure;
 
 pub use closure::Closure;
+/// The fake `#[wasm_bindgen]` proc macro. See `../../wasm-bindgen-macro`.
+pub use wasm_bindgen_macro::wasm_bindgen;
 
 /// The object protocol. Everything an object can do in this shim.
 ///
@@ -48,8 +50,9 @@ pub use closure::Closure;
 /// # What the proc macro emits
 ///
 /// Each `web_sys` binding attribute maps to exactly one protocol call on
-/// the receiver, with the `js_name` (defaulting to the Rust name in
-/// lowerCamelCase, as the real macro does) as the key:
+/// the receiver, with the `js_name` (defaulting to the Rust identifier
+/// verbatim, as the real macro does -- there is no case conversion; see
+/// `wasm-bindgen-macro/src/externs.rs::op`) as the key:
 ///
 /// | binding attribute                     | protocol call                |
 /// |---------------------------------------|------------------------------|
@@ -494,13 +497,17 @@ impl JsCast for JsValue {
 ///
 /// The proc macro emits one invocation of this per `extern` type, so any
 /// impl every wrapper type needs belongs here rather than in the macro.
+/// It passes the declaration's visibility and its surviving attributes
+/// (`#[doc]`, `#[cfg]`, `#[deprecated]`) straight through -- but not its
+/// `#[derive]`, since the derives above are already exactly the set
+/// web-sys asks for.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! wrapper_type {
     // A type with no JS parent: derefs straight to `JsValue`, as
     // `js_sys::Object` does in the real crate.
-    ($name:ident, $class:literal $(,)?) => {
-        $crate::wrapper_type!(@common $name, $class);
+    ($(#[$attr:meta])* $vis:vis $name:ident, $class:literal $(,)?) => {
+        $crate::wrapper_type!(@common $(#[$attr])* $vis $name, $class);
 
         impl ::core::ops::Deref for $name {
             type Target = $crate::JsValue;
@@ -510,8 +517,8 @@ macro_rules! wrapper_type {
         }
     };
 
-    ($name:ident, $class:literal, extends: $parent:ty $(, $ancestor:ty)* $(,)?) => {
-        $crate::wrapper_type!(@common $name, $class);
+    ($(#[$attr:meta])* $vis:vis $name:ident, $class:literal, extends: $parent:ty $(, $ancestor:ty)* $(,)?) => {
+        $crate::wrapper_type!(@common $(#[$attr])* $vis $name, $class);
 
         impl ::core::ops::Deref for $name {
             type Target = $parent;
@@ -537,10 +544,11 @@ macro_rules! wrapper_type {
         }
     )*};
 
-    (@common $name:ident, $class:literal) => {
+    (@common $(#[$attr:meta])* $vis:vis $name:ident, $class:literal) => {
+        $(#[$attr])*
         #[derive(Clone, PartialEq, Eq)]
         #[repr(transparent)]
-        pub struct $name {
+        $vis struct $name {
             obj: $crate::JsValue,
         }
 
@@ -667,8 +675,7 @@ pub fn throw_val(v: JsValue) -> ! {
 
 pub mod prelude {
     //! What `use wasm_bindgen::prelude::*;` brings in.
-    // wasm_bindgen macro: re-exported here by shims/wasm-bindgen-macro
-    // (next track), as `pub use wasm_bindgen_macro::wasm_bindgen;`.
     pub use crate::closure::Closure;
     pub use crate::{JsCast, JsValue, UnwrapThrowExt};
+    pub use wasm_bindgen_macro::wasm_bindgen;
 }

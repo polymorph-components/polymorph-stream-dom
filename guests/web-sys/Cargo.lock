@@ -847,6 +847,9 @@ dependencies = [
 [[package]]
 name = "wasm-bindgen"
 version = "0.2.128"
+dependencies = [
+ "wasm-bindgen-macro",
+]
 
 [[package]]
 name = "wasm-bindgen-futures"
@@ -854,6 +857,16 @@ version = "0.4.55"
 dependencies = [
  "wasm-bindgen",
  "wit-bindgen",
+]
+
+[[package]]
+name = "wasm-bindgen-macro"
+version = "0.2.128"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -893,11 +906,10 @@ dependencies = [
 [[package]]
 name = "web-sys"
 version = "0.3.105"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fbddc4a036f00ec4f18c83445bd3115cb306a91da554919a099d9222fe4a7f8"
 dependencies = [
  "js-sys",
- "prost",
- "stream-dom-fakedom",
- "stream-dom-guest",
  "wasm-bindgen",
 ]
 

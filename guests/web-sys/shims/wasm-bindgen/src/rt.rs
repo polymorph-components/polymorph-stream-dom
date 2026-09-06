@@ -15,6 +15,14 @@ use std::rc::Rc;
 
 use crate::{JsObject, JsValue};
 
+/// Re-exported for macro-generated code only. `web_sys` is `#![no_std]`,
+/// so the bodies the macro emits cannot name `std`, and reaching for
+/// `::alloc` would require every crate using the macro to have declared
+/// `extern crate alloc`. An indexing binding's `index.to_string()` and a
+/// string enum's `String` lift therefore go through these.
+#[doc(hidden)]
+pub use std::string::{String, ToString};
+
 // ---------------------------------------------------------------------
 // Lowering: Rust -> JsValue
 // ---------------------------------------------------------------------
@@ -477,5 +485,5 @@ mod tests {
         Wrapped::unchecked_from_js(v)
     }
 
-    crate::wrapper_type!(Wrapped, "Object");
+    crate::wrapper_type!(pub Wrapped, "Object");
 }
