@@ -3,9 +3,11 @@
 
 default: check test
 
-# Type-check and lint every workspace (Rust: both cargo workspaces, for the
-# component target; TS: receiver + web).
-check:
+# Type-check and lint every workspace (Rust: the two component workspaces
+# for the wasm target, the native host workspace; TS: receiver + web +
+# desktop UI). Depends on desktop-ui because tauri's generate_context!
+# refuses to compile without the frontendDist directory present.
+check: desktop-ui
     cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
     cargo clippy --manifest-path guests/web-sys/Cargo.toml --workspace --target wasm32-wasip2 -- -D warnings
     cargo clippy --manifest-path host/Cargo.toml --workspace -- -D warnings
@@ -73,14 +75,11 @@ desktop-ui:
     deno run -A host/desktop/build.ts
 
 # Build the Tauri desktop app: the TodoMVC component it embeds, its
-# frontend bundle, then the Rust binary. `resource_dir()` in an unbundled
-# dev/CI build resolves to the binary's own directory (tauri-utils
-# `platform::resource_dir`'s "cargo output directory" case), so the
-# component the binary loads via `BaseDirectory::Resource` has to be
-# copied there by hand rather than relying on `tauri.conf.json`'s
-# `bundle.resources` (that only fires for `cargo tauri build`, which this
-# recipe deliberately does not invoke — the dispatch names a plain
-# `cargo build --release`).
+# frontend bundle, then the Rust binary. The app is never bundled, so the
+# component is copied beside the binary by hand: `resource_dir()` is the
+# binary's own directory for an unbundled build, and a `bundle.resources`
+# entry in tauri.conf.json would make tauri-build fail whenever the
+# component has not been built yet (`just check` runs before it has).
 desktop: host-component desktop-ui
     cargo build --manifest-path host/Cargo.toml -p stream-dom-desktop --release
     mkdir -p host/target/release/components
