@@ -2,8 +2,9 @@
 
 Status: design stage. Nothing here is implemented. This document records
 decisions and their reasons so that later work argues with the reasons
-rather than re-deriving them; it is not a specification. The WIT under
-`wit/` is a draft of the same decisions in schema form.
+rather than re-deriving them; it is not a specification. The schema is
+drafted in two files by layer: `proto/stream-dom.proto` for every byte on
+the wire, `wit/stream-dom.wit` for what only the component model carries.
 
 ## Purpose
 
@@ -125,8 +126,10 @@ producer adapter ──▶ stream<u8> ──▶ [transformers]* ──▶ receiv
 
 ### The channel is `stream<u8>` of op frames
 
-The WIT `operation` variant and its records are the *schema*; the wire is
-its byte encoding (below). No function takes an `operation` value.
+The wire is length-delimited protobuf `Frame` messages, defined in
+`proto/stream-dom.proto`. WIT carries what only the component model can
+carry — functions, resources, the stream itself — and no data type is
+defined in both places.
 
 An earlier draft made the channel `stream<operation>`, typed end to end,
 with a byte encoding as a transformer output for the remote hop. That was
@@ -139,13 +142,12 @@ not:
 - **Cost.** The measured 0.15–0.8 µs/op was canonical-ABI lift of a
   variant with strings, plus one JS object per op on a JS receiver and one
   `realloc` per string on a wasm receiver. A `stream<u8>` write is a
-  memcpy of the chunk; a receiver decodes with a `DataView` switch and no
-  per-op allocation, and a wasm receiver reads strings as slices of the
-  chunk buffer.
+  memcpy of the chunk; a receiver can decode field-by-field into DOM calls
+  with no per-op allocation (see Encoding), and a wasm receiver reads
+  strings as slices of the chunk buffer.
 - **Evolution.** A WIT variant cannot gain a case compatibly; every new op
-  is a version bump and a digest mismatch. Length-prefixed frames give
-  skip-unknown, so additions (shadow DOM, future definitional ops) land
-  without breaking receivers that predate them.
+  is a version bump and a digest mismatch. Protobuf field numbers give
+  additive change at both the op level and the field level.
 - **Byte-bounded receiving.** Ops are variable-size; a read buffer of K
   elements bounds nothing. A read buffer of K bytes does.
 - **Maturity.** `stream<u8>` is the most exercised path in the async
@@ -157,16 +159,8 @@ not:
 
 What typed elements gave up: canonical-ABI validation of UTF-8 and bounds
 (now the decoder's job — which is where it belongs anyway if producers can
-be untrusted, open question 10), typed values in traces (the corpus
-tooling needs a frame-to-text decoder on day one regardless), and codecs
-written by hand per language. The codec is ~20 frame layouts, and the
-schema in WIT remains the single source of truth for shape; a generator is
-not warranted until a third language appears.
-
-`queries` and `events` stay typed component calls: low volume, RPC-shaped,
-and `handle-event` carries `borrow<dom-event>`, which has no byte form and
-is the whole of option A under Events. The remote tier encodes events
-separately, as it always had to.
+be untrusted, open question 10) and typed values in traces (stock protobuf
+tooling reads the corpus instead).
 
 **Never `list<u8>` per batch.** A `list` is lifted and lowered atomically:
 the receiver must have room for the whole batch before the rendezvous
@@ -176,27 +170,60 @@ across batch boundaries without holding several whole batches. With the
 stream, receiver memory is a tuning knob, backpressure is per chunk, and
 processing may start before production finishes.
 
-### Encoding
+### Encoding: protobuf, and why not a hand-rolled layout
 
-A deterministic mapping from the WIT types; the WIT is normative for
-shape, this section for bytes. Little-endian throughout.
+`proto/stream-dom.proto` (proto3) is normative for every byte on the
+stream and in event payloads. The stream is the standard length-delimited form — varint byte
+length, then one `Frame`, repeated. No header; the package version is
+digest-checked at instantiation, and additive schema change (new `oneof`
+cases, new fields) needs no version bump because receivers skip what they
+do not know.
 
-- **Frame**: `u32 len`, then `len` bytes: `u8 tag` (the `operation` case
-  index) followed by the case's fields in declaration order. A receiver
-  that does not know `tag` skips `len` bytes.
-- **Scalars**: `u8`/`u16`/`u32`/`s64`/`f64` fixed-width; `bool` as `u8`.
-- **`string`**: `u32` byte length, UTF-8. **`list<T>`**: `u32` count,
-  elements. **`option<T>`**: `u8` presence, then `T` if 1. **`flags`**:
-  one `u8` per 8 declared bits. Nested `record`s inline; nested `variant`s
-  as `u8` tag then fields.
-- The stream has no header; versioning is per package (digest-checked at
-  instantiation) with skip-unknown for additive change.
+Chosen over a hand-rolled positional layout, which was the previous
+draft, for four things it could not offer cheaply:
+
+- **Field-level evolution.** A positional layout can skip an unknown *op*
+  by its length but cannot add a field to an existing op without a version
+  bump. Open questions 9 and 10 will touch existing ops.
+- **Tooling.** `protoc --decode` and `buf` read the corpus; the
+  frame-to-text decoder the corpus needs is stock.
+- **Generated codecs** in every producer language (prost, pbf,
+  protobuf-go, Kotlin) instead of ~20 hand-written layouts per language,
+  forever.
+- **Events in the same schema.** The remote tier needed a second
+  hand-rolled encoding for event payloads; now it is the same file.
+
+The cost is decode speed with *generated* readers, which build an object
+per message — roughly the cost profile of the typed lift declined above.
+pbf (mapbox) removes it: alongside `.proto`-generated readers it exposes
+`readFields((tag, obj, pbf) => …)` with `readVarint` / `readString` /
+`skip`, so the hot structural ops are decoded with a switch on field tag
+straight into DOM calls, no intermediate object, while cold ops
+(`register-template`, nested messages) use the generated readers. Same
+`.proto`, same library, ~3 KB; built for Mapbox vector tiles, which is the
+same shape of problem. Its writer side (`writeVarintField`,
+`writeStringField`, `writeMessage`) gives the JS producer adapters and the
+remote-dom transcoder an allocation-light encoder. protobuf.js has the
+equivalent `Reader` / `pbjs` split and is the fallback if pbf's codegen
+proves too thin; protobuf-es or ts-proto only if generated TypeScript
+types are wanted, since pbf emits JS with JSDoc. Rust layers the same way:
+prost generated code by default, `prost::encoding`'s public
+`encode_varint` / `encode_key` for a hand-written hot encoder if a profile
+asks for one.
+
+Rejected: FlatBuffers and Cap'n Proto are zero-copy, attractive for a wasm
+receiver, but vtables/offsets and 8-byte alignment roughly double frames
+that are 6–20 bytes long — wrong tool for a stream of tiny messages. CBOR
+is self-describing and universal but slower, larger and without codegen
+worth the name. postcard/bincode are Rust-only in practice.
+
+Size is a wash or a small win over the positional draft: varint node ids
+and `str-ref`s beat fixed `u32`/`u16`; the `oneof` wrapper costs ~2 bytes
+per frame. `str-ref` is therefore a `uint32` varint, not a `u16`.
 
 Rendezvous copies split at byte granularity, so a frame may straddle two
-reads; decoders keep partial-frame state. Producers typically encode a
-whole batch into one buffer and issue one write, but nothing depends on
-it. Fixed-width over varint is a simplicity choice; revisit only with a
-measurement (open question 6).
+reads; decoders keep the partial tail. Producers typically encode a whole
+batch into one buffer and issue one write, but nothing depends on it.
 
 ### Batches are framed by a `commit` op, not by the transport
 
@@ -267,14 +294,14 @@ Frameworks disagree at the edges about which names are DOM properties
 React, Preact, Vue each carry their own table; Dioxus's host port carries
 dioxus-web's. Making the receiver decide couples every framework to one
 policy. The producer adapter decides, using the table its framework
-already has. `set-property` carries a typed value; `none` deletes.
+already has. `set-property` carries a typed value; an absent value deletes.
 
 ### Interning
 
-`intern(id: u16, s: string)` defines a slot; tags, namespaces, attribute
+`intern(id, s)` defines a slot; tags, namespaces, attribute
 names, event names are `str-ref`s. Definitions precede first use in the
 same stream; each definition is emitted once per producer instance. Event
-names cross back on `handle-event` as the same `u16`, so steady-state event
+names cross back on `handle-event` as the same small integer, so steady-state event
 dispatch transfers no string data. (Borrowed from polyengine-dioxus.)
 
 ### Templates are core, not an extension
@@ -307,10 +334,14 @@ Two things this buys beyond mount cost:
   nested component, a control-flow site) is a `dynamic` template node,
   which clones as a placeholder to `insert-before` against.
 
-Templates are an arena, not HTML. WIT forbids recursive types, so a
-template is a flat pre-order `list<template-node>` with `u32` indices for
-roots and children; receivers validate the index graph (range, acyclicity)
-rather than trust it. (Borrowed from polyengine-dioxus.) The alternative —
+Templates are an arena, not HTML. A template is a flat pre-order list of
+nodes with integer indices for roots and children; receivers validate the
+index graph (range, acyclicity) rather than trust it. (Borrowed from
+polyengine-dioxus, where WIT's ban on recursive types forced it; protobuf
+would allow nesting, and the arena is kept anyway: `bind-path` resolves
+by index in O(depth) with no recursive decode, one template can carry
+several roots, and validation is a bounds check rather than a depth
+limit.) The alternative —
 ship the template as an HTML string and let the receiver parse it into a
 `<template>`, which is what Svelte and Solid do in-browser — was rejected
 for the same reason positional hydration was: the HTML parser reshapes
@@ -369,8 +400,9 @@ gets the real node because it *is* receiver-side code, and
 how Shopify remote-dom v2 exposes host UI to sandboxed producers, and how
 server-driven-UI systems work generally. Two things it needs from the
 protocol: a `custom` payload family carrying the `CustomEvent.detail`, and
-a structured `value` variant (JSON or a `list`/`record` tree) so props can
-be more than scalars. `innerHTML` and Selection/Range manipulation, which
+a structured property value so props can be more than scalars —
+`google.protobuf.Value` is the obvious candidate now that the wire is
+protobuf. `innerHTML` and Selection/Range manipulation, which
 the protocol otherwise lacks on purpose, live behind the same door.
 
 ### Hydration is push, and binds by marker
@@ -402,16 +434,27 @@ receiver, not part of the op stream; the op carries only the key.
 
 ## Events
 
-Dispatch: `handle-event(target, name, payload, ev)` export. `payload` is a
-typed snapshot, family chosen host-side by event name (mouse, keyboard,
-form, ...), carrying everything a handler commonly reads (`target.value`,
-`checked`, key, coordinates, form data on submit, `relatedTarget` as an
-id). Files and drag data are resources, not copies. Two families are
+Dispatch: `handle-event(target, name, payload: list<u8>, ev)` export.
+`target` and `name` are plain scalars so the guest can route without
+decoding; `payload` is a protobuf `EventPayload` — a typed snapshot whose
+family the receiver chooses by event name (mouse, keyboard, form, ...),
+carrying everything a handler commonly reads (`target.value`, `checked`,
+key, coordinates, form data on submit, `relatedTarget` as an id). The
+same bytes cross the worker and network tiers, so there is one definition
+of every family and no in-process/remote split. A `list<u8>` here is fine
+where a `list` per batch was not: one small message per call, not a
+batch. Files and drag data are resources, not copies. Two families are
 synthesized by the receiver from observers rather than DOM events
 (`resize`, `visible`), and `mounted` is synthetic: fired once per
 registered element after the batch that created it is fully applied.
 (Families and synthetics borrowed from polyengine-dioxus; contents to be
 ported.)
+
+`queries` keep typed WIT signatures: they are RPC with small fixed return
+shapes (`rect`, `point`, `size`), typing the call is free in-process, and
+they are not on the stream. Those three records are the only data typed
+in WIT; a remote tier that forwards queries encodes them as part of its
+own RPC, which is a transport concern rather than protocol.
 
 Delegation: bubbling events are delegated at the mount root; non-bubbling
 ones are attached per element. The listener op carries the `bubbles` bit
@@ -680,7 +723,7 @@ order-of-magnitude):
   landed upstream, ~0.7–0.8 µs/op overhead on string-heavy ops, ~0.15 µs/op
   on single-field variants; 1.1–1.8x on the channel, which is itself a
   small fraction of DOM work. Earlier figures (5 µs/op) were an interpreter
-  bug, not the component model. The byte protocol is what this design now
+  bug, not the component model. A byte protocol is what this design now
   ships; the typed figures are what it declined to pay.
 - Stream vs synchronous call transport: bulk-op deltas within noise. The
   call transport was retired for a semantic reason — no host-retained
@@ -715,7 +758,7 @@ definition.
    backpressure when a DOM event arrives, with a stackful scheduler? If
    "essentially never", A + C is settled.
 3. **Islands.** Custom elements as sketched above; remaining: the
-   `custom` payload family, a structured `value` variant for props, and a
+   `custom` payload family, a structured property value for props, and a
    generic `call-method` query (also what remote-dom interop needs).
 4. **Coalescer window and index.** K and the key shape. Template and
    binding ops (`register-template`, `clone-template`, `bind-path`,
@@ -724,12 +767,14 @@ definition.
 5. **Resync.** `reset` semantics and whether a full snapshot is a special
    batch or the normal initial-mount batch replayed. Also the id-space
    exhaustion path, since ids are never reused.
-6. **Encoding details.** Fixed-width vs varint integers; a maximum frame
-   length; whether `intern` slots should be `u16`. Decide with a
-   measurement on the corpus, not in advance.
-7. **Conformance corpus format.** Recorded frame streams as the shared test
-   vector across adapters × transports; first thing to build, together
-   with the frame-to-text decoder.
+6. **Codec tiers.** Whether the pbf hybrid decode is needed at all, or
+   generated readers are fast enough: measure both on the corpus before
+   writing the hand-switch. Whether generated TypeScript types (ts-proto,
+   protobuf-es) are worth a second toolchain beside pbf.
+7. **Conformance corpus.** Recorded length-delimited `Frame` streams
+   (`.pb`) plus the event payloads that answer them, as the shared test
+   vector across adapters × transports; readable with stock protobuf
+   tooling; first thing to build.
 8. **First producer.** Leptos (tachys `Renderer`) if its renderer is still
    pluggable in current releases, else Sycamore; Dioxus as the diffing
    counterpart. A fine-grained first producer exercises templates,

@@ -17,8 +17,12 @@ are receivers and islands. See the design record.
 
 **Status: design stage.** There is no code. Start with
 [`docs/design.md`](docs/design.md), which records the decisions and their
-reasons; [`wit/stream-dom.wit`](wit/stream-dom.wit) is the same decisions
-as a draft schema (parses with `wasm-tools component wit wit/`).
+reasons. The schema is in two files by layer:
+[`proto/stream-dom.proto`](proto/stream-dom.proto) defines every byte on
+the wire (op frames, event payloads; `protoc` parses it), and
+[`wit/stream-dom.wit`](wit/stream-dom.wit) defines what only the component
+model can carry — the stream, the event export, the query imports, the
+`dom-event` resource (`wasm-tools component wit wit/` parses it).
 
 The immediate predecessor is
 [polyengine-dioxus](https://github.com/lannbot/polyengine-dioxus), a

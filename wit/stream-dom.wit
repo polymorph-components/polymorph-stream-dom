@@ -1,189 +1,37 @@
 /// polymorph:stream-dom — a framework-neutral DOM-mutation stream.
 ///
-/// DRAFT. This file is the schema form of docs/design.md; read that for
-/// the reasons. Every decision here is provisional until the conformance
-/// corpus and a first pair of adapters exist.
+/// DRAFT. This file is the component-model half of the protocol: the
+/// functions, resources and stream that only WIT can express. Every byte
+/// on the stream and in event payloads is defined by proto/stream-dom.proto
+/// (length-delimited `Frame` messages; `EventPayload`). No data type is
+/// defined in both places. docs/design.md records the reasons.
 ///
-/// A producer (any renderer) emits op frames on a `stream<u8>`; a receiver
+/// A producer (any renderer) writes frames to a `stream<u8>`; a receiver
 /// (something owning a DOM) applies them. Transformers may sit between
 /// with the shape `func(in: stream<u8>) -> stream<u8>`. The stream is an
-/// unbuffered rendezvous channel of bytes — frames are length-prefixed,
-/// batches are framed by the `commit` op, and the transport knows neither.
+/// unbuffered rendezvous channel of bytes — batches are framed by the
+/// `Commit` op, and the transport knows neither frames nor batches.
 package polymorph:stream-dom@0.1.0;
 
-/// The op vocabulary, as the SCHEMA of the byte encoding. No function takes
-/// an `operation` value; the types here define the layout of each frame
-/// (docs/design.md "Encoding": `u32 len`, `u8 tag` = case index, fields in
-/// declaration order, little-endian, `u32`-prefixed UTF-8 strings and
-/// lists, `u8` option presence). Normative once out of draft: a change to
-/// an existing case bumps the package version, and instantiation is
-/// digest-checked; a new case is additive, since receivers skip unknown
-/// tags by `len`.
-///
-/// Invariants every producer upholds and every transformer preserves:
-/// - Every op names its target(s) explicitly. There is no implicit stack,
-///   cursor, or "current node". This is what makes a bounded-window
-///   coalescer possible.
-/// - An `intern` definition precedes the first use of its `str-ref` in
-///   the same stream and is emitted once per producer instance.
-///   Transformers never drop an `intern`.
-/// - Node ids are producer-allocated, per stream, and never reused. `0` is
-///   the mount root. `remove` frees the subtree's nodes, not its ids: the
-///   reverse channel (`handle-event`) is not ordered against this stream,
-///   so a reused id could deliver a stale event to the wrong node. A
-///   `handle-event` for an unknown id is dropped.
-interface mutations {
-  /// Interned string slot, defined by a prior `intern` op.
-  type str-ref = u16;
-  /// Producer-allocated node id. `0` is the mount root.
+interface types {
+  /// Producer-allocated node id, never reused within a stream. `0` is the
+  /// mount root.
   type node-id = u32;
-
-  /// Define (or overwrite) interned slot `id`.
-  record intern { id: str-ref, s: string }
-
-  /// Create a detached element. `ns` is an interned namespace URI.
-  record create-element { id: node-id, tag: str-ref, ns: option<str-ref> }
-
-  /// Create a detached text node.
-  record create-text { id: node-id, text: string }
-
-  /// Insert `id` under `parent` before `anchor`; `anchor = none` appends.
-  /// Moving an already-inserted node is allowed and is exactly what the
-  /// DOM's `insertBefore` does; receivers prefer `moveBefore` where
-  /// available so the move preserves node state.
-  record insert-before { parent: node-id, id: node-id, anchor: option<node-id> }
-
-  /// Set a text node's content.
-  record set-text { id: node-id, text: string }
-
-  /// Set or remove (`value = none`) an attribute. The producer adapter
-  /// decides attribute vs property using its framework's own table.
-  record set-attribute {
-    id: node-id,
-    name: str-ref,
-    ns: option<str-ref>,
-    value: option<string>,
-  }
-
-  /// A typed property value. `none` deletes / sets `undefined`.
-  variant value {
-    text(string),
-    int(s64),
-    float(f64),
-    boolean(bool),
-    none,
-  }
-
-  /// Set a DOM property (`value`, `checked`, `innerHTML`, ...).
-  record set-property { id: node-id, name: str-ref, value: value }
-
-  /// Listener registration flags.
-  ///
-  /// `bubbles` is the producer's verdict for this event name; the
-  /// receiver delegates bubbling events at the mount root and attaches
-  /// non-bubbling ones per element, and needs the same bit on removal.
-  /// `prevent-default` / `stop-propagation` are the declarative path a
-  /// remote receiver can honor without a round trip; see docs/design.md
-  /// "Events".
-  flags listener-flags {
-    bubbles,
-    capture,
-    passive,
-    prevent-default,
-    stop-propagation,
-  }
-
-  record listener { id: node-id, name: str-ref, opts: listener-flags }
-
-  // --- Templates ---
-  //
-  // Core vocabulary, not an extension: every non-diffing framework (and
-  // Dioxus) mounts by cloning compiled templates and binding holes, and
-  // without these ops a mount degrades to one create per node. A producer
-  // without templates (React) simply never emits them.
-
-  record template-attr { name: str-ref, ns: option<str-ref>, value: string }
-
-  /// Children are indices into the enclosing `register-template.nodes`.
-  record template-element {
-    tag: str-ref,
-    ns: option<str-ref>,
-    attrs: list<template-attr>,
-    children: list<u32>,
-  }
-
-  /// WIT forbids recursive types, so a template is a flat pre-order arena.
-  /// A receiver validates indices (range, acyclicity) rather than trusting
-  /// them. An arena rather than an HTML string because the HTML parser
-  /// reshapes trees, which would make `bind-path` paths unreliable; a
-  /// compiler that has the HTML parses it into the arena at build time.
-  variant template-node {
-    element(template-element),
-    text(string),
-    /// An element hole (nested component, control-flow site). Clones as a
-    /// placeholder to `insert-before` against. Text and attribute holes
-    /// need no marker: `bind-path` to the node, then `set-text` /
-    /// `set-attribute`.
-    dynamic,
-  }
-
-  record register-template { id: u16, nodes: list<template-node>, roots: list<u32> }
-
-  /// Deep-clone template `tmpl`'s root number `root` as a detached node `id`.
-  record clone-template { tmpl: u16, root: u16, id: node-id }
-
-  /// Bind `id` to the interior node of a cloned template reached from
-  /// `root` by walking child indices in `path`. Positions are reliable
-  /// here because the producer built the tree. Self-contained: the root is
-  /// named, not implied.
-  record bind-path { root: node-id, path: list<u8>, id: node-id }
-
-  // --- Hydration ---
-
-  /// Bind `id` to the prerendered node the server-side render stamped with
-  /// `key` (an attribute on elements, a comment beside text nodes and
-  /// placeholders; the syntax is an SSR/receiver agreement, not part of
-  /// this stream). By marker rather than by position because the HTML
-  /// parser reshapes the served tree — `<tbody>` insertion, `<p>`
-  /// auto-close, adjacent text merged — so child indices from the mount
-  /// root are not trustworthy. A missing key is a receiver error.
-  record bind-marker { key: u32, id: node-id }
-
-  variant operation {
-    intern(intern),
-    create-element(create-element),
-    create-text(create-text),
-    /// A comment node used as an insertion anchor for fragments.
-    create-placeholder(node-id),
-    insert-before(insert-before),
-    /// Detach and free the subtree rooted at this id.
-    remove(node-id),
-    set-text(set-text),
-    set-attribute(set-attribute),
-    set-property(set-property),
-    add-listener(listener),
-    remove-listener(listener),
-    register-template(register-template),
-    clone-template(clone-template),
-    bind-path(bind-path),
-    bind-marker(bind-marker),
-    /// Batch boundary. A signal, not a buffering instruction: after-commit
-    /// work (synthetic `mounted`, islands) runs here; a transformer that
-    /// merges batches emits one.
-    commit,
-  }
+  /// Interned string slot, defined by a prior `Intern` frame.
+  type str-ref = u32;
 }
 
 /// Host-side reads and imperative DOM actions. All `async`: a host behind
 /// a worker or network must be allowed to park the guest; a same-thread
 /// host answers without blocking, and a guest that sync-lowers these sees
-/// a plain blocking call on every host.
+/// a plain blocking call on every host. These are RPC, not stream data,
+/// and are the only values typed here rather than in the proto.
 ///
 /// Reentrancy: `set-focus` fires `focusin`/`focusout` synchronously. The
 /// receiver must bracket such calls with a dispatch gate and drain queued
 /// event dispatches after the guest's turn unwinds.
 interface queries {
-  use mutations.{node-id};
+  use types.{node-id};
 
   record point { x: f64, y: f64 }
   record size { width: f64, height: f64 }
@@ -195,31 +43,7 @@ interface queries {
   set-focus: async func(target: node-id, focus: bool) -> bool;
 }
 
-/// Event delivery. The payload families are a typed snapshot chosen
-/// host-side by event name; the set and contents follow polyengine-dioxus's
-/// and are to be ported — only enough is sketched here to fix the shape.
 interface events {
-  use mutations.{node-id, str-ref};
-
-  record mouse-data {
-    client-x: f64, client-y: f64,
-    buttons: u16, modifiers: u8,
-    related-target: option<node-id>,
-  }
-  record keyboard-data { key: string, code: string, modifiers: u8, repeat: bool }
-  /// The target control's current value, and the whole form's values on
-  /// `submit`.
-  record form-data { value: string, values: list<tuple<string, string>> }
-
-  variant payload {
-    empty,
-    mouse(mouse-data),
-    keyboard(keyboard-data),
-    form(form-data),
-    // pointer, wheel, drag, touch, scroll, composition, animation,
-    // transition, image, resize, visible: to be ported.
-  }
-
   /// The live event, lent to the handler for its synchronous prefix.
   /// Calls made after the handler first blocks are too late — the same
   /// rule a browser applies after the first `await`.
@@ -230,30 +54,31 @@ interface events {
 }
 
 world producer {
-  use mutations.{node-id, str-ref};
-  use events.{payload, dom-event};
+  use types.{node-id, str-ref};
+  use events.{dom-event};
 
   import queries;
 
   /// Mount. `hydrate = true` means the mount root already holds this
   /// producer's prerendered markup: the first batch binds ids with
-  /// `bind-marker` and creates no nodes.
+  /// `BindMarker` and creates no nodes.
   ///
-  /// The stream carries `mutations.operation` frames in the documented
-  /// encoding. Returning it makes the channel's lifecycle structural: it
-  /// exists iff the producer started, once, tied to this instance. The
-  /// receiver retains the readable end for the instance's lifetime; a
-  /// parked scheduler is then a documented idle state, not a deadlock.
+  /// The stream carries length-delimited `Frame` messages. Returning it
+  /// makes the channel's lifecycle structural: it exists iff the producer
+  /// started, once, tied to this instance. The receiver retains the
+  /// readable end for the instance's lifetime; a parked scheduler is then
+  /// a documented idle state, not a deadlock.
   export run: async func(hydrate: bool) -> stream<u8>;
 
   /// Dispatch one event to the listener registered on `target` under the
-  /// interned `name`. `mounted` is synthetic: the receiver fires it once
-  /// per registered element after the `commit` of the batch that created
-  /// it, with an `empty` payload.
+  /// interned `name`. `target` and `name` are plain so the guest can route
+  /// without decoding; `payload` is an encoded `EventPayload`. `mounted`
+  /// is synthetic: the receiver fires it once per registered element after
+  /// the `Commit` of the batch that created it, with an empty payload.
   export handle-event: async func(
     target: node-id,
     name: str-ref,
-    payload: payload,
+    payload: list<u8>,
     ev: borrow<dom-event>,
   );
 }

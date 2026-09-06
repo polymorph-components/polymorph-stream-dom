@@ -1,0 +1,275 @@
+// polymorph:stream-dom — wire schema.
+//
+// DRAFT. Normative for every byte on the mutation stream and in event
+// payloads; docs/design.md records the reasons. WIT (wit/stream-dom.wit)
+// carries only what the component model must: functions, resources, the
+// stream itself. No data type is defined in both places.
+//
+// Stream layout: standard length-delimited messages — varint byte length,
+// then one Frame, repeated. No header. Additive change (new oneof cases,
+// new fields) needs no version bump; receivers skip what they do not know.
+// Changing an existing field does bump the package version, and
+// instantiation is digest-checked.
+//
+// Invariants every producer upholds and every transformer preserves:
+// - Every op names its target(s) explicitly. No implicit stack, cursor or
+//   "current node". This is what makes a bounded-window coalescer possible.
+// - An Intern precedes the first use of its slot in the same stream and is
+//   emitted once per producer instance. Transformers never drop an Intern.
+// - Node ids are producer-allocated, per stream, and never reused. 0 is
+//   the mount root. Remove frees the subtree's nodes, not its ids: the
+//   reverse channel (handle-event) is not ordered against this stream, so a
+//   reused id could deliver a stale event to the wrong node. An event for
+//   an unknown id is dropped.
+
+syntax = "proto3";
+
+package polymorph.stream_dom;
+
+// One op. The oneof case is the op kind; a receiver that does not know the
+// case skips the frame.
+message Frame {
+  oneof op {
+    Intern intern = 1;
+    CreateElement create_element = 2;
+    CreateText create_text = 3;
+    // A comment node used as an insertion anchor for fragments.
+    CreatePlaceholder create_placeholder = 4;
+    InsertBefore insert_before = 5;
+    // Detach and free the subtree rooted at this id.
+    Remove remove = 6;
+    SetText set_text = 7;
+    SetAttribute set_attribute = 8;
+    SetProperty set_property = 9;
+    AddListener add_listener = 10;
+    RemoveListener remove_listener = 11;
+    RegisterTemplate register_template = 12;
+    CloneTemplate clone_template = 13;
+    BindPath bind_path = 14;
+    BindMarker bind_marker = 15;
+    // Batch boundary. A signal, not a buffering instruction: after-commit
+    // work (synthetic `mounted`, islands) runs here; a transformer that
+    // merges batches emits one.
+    Commit commit = 16;
+  }
+}
+
+// Interned string slots (`str_ref` fields) and node ids are uint32 varints.
+
+// Define (or overwrite) interned slot `id`.
+message Intern {
+  uint32 id = 1;
+  string s = 2;
+}
+
+// Create a detached element. `ns` is an interned namespace URI.
+message CreateElement {
+  uint32 id = 1;
+  uint32 tag = 2;
+  optional uint32 ns = 3;
+}
+
+// Create a detached text node.
+message CreateText {
+  uint32 id = 1;
+  string text = 2;
+}
+
+message CreatePlaceholder {
+  uint32 id = 1;
+}
+
+// Insert `id` under `parent` before `anchor`; no `anchor` appends. Moving
+// an already-inserted node is allowed and is exactly what the DOM's
+// insertBefore does; receivers prefer moveBefore where available so the
+// move preserves node state.
+message InsertBefore {
+  uint32 parent = 1;
+  uint32 id = 2;
+  optional uint32 anchor = 3;
+}
+
+message Remove {
+  uint32 id = 1;
+}
+
+// Set a text node's content.
+message SetText {
+  uint32 id = 1;
+  string text = 2;
+}
+
+// Set or remove (no `value`) an attribute. The producer adapter decides
+// attribute vs property using its framework's own table.
+message SetAttribute {
+  uint32 id = 1;
+  uint32 name = 2;
+  optional uint32 ns = 3;
+  optional string value = 4;
+}
+
+// A typed property value.
+message Value {
+  oneof kind {
+    string text = 1;
+    sint64 int = 2;
+    double float = 3;
+    bool boolean = 4;
+  }
+}
+
+// Set a DOM property (`value`, `checked`, `innerHTML`, ...). No `value`
+// deletes / sets undefined.
+message SetProperty {
+  uint32 id = 1;
+  uint32 name = 2;
+  optional Value value = 3;
+}
+
+// Listener registration.
+//
+// `bubbles` is the producer's verdict for this event name; the receiver
+// delegates bubbling events at the mount root and attaches non-bubbling
+// ones per element, and needs the same bit on removal. `prevent_default` /
+// `stop_propagation` are the declarative path a remote receiver can honor
+// without a round trip; see docs/design.md "Events".
+message Listener {
+  uint32 id = 1;
+  uint32 name = 2;
+  bool bubbles = 3;
+  bool capture = 4;
+  bool passive = 5;
+  bool prevent_default = 6;
+  bool stop_propagation = 7;
+}
+
+message AddListener {
+  Listener listener = 1;
+}
+
+message RemoveListener {
+  Listener listener = 1;
+}
+
+// --- Templates ---
+//
+// Core vocabulary, not an extension: every non-diffing framework (and
+// Dioxus) mounts by cloning compiled templates and binding holes, and
+// without these ops a mount degrades to one create per node. A producer
+// without templates (React) simply never emits them.
+
+message TemplateAttr {
+  uint32 name = 1;
+  optional uint32 ns = 2;
+  string value = 3;
+}
+
+// Children are indices into the enclosing RegisterTemplate.nodes.
+message TemplateElement {
+  uint32 tag = 1;
+  optional uint32 ns = 2;
+  repeated TemplateAttr attrs = 3;
+  repeated uint32 children = 4;
+}
+
+// An element hole (nested component, control-flow site). Clones as a
+// placeholder to InsertBefore against. Text and attribute holes need no
+// marker: BindPath to the node, then SetText / SetAttribute.
+message Dynamic {}
+
+message TemplateNode {
+  oneof kind {
+    TemplateElement element = 1;
+    string text = 2;
+    Dynamic dynamic = 3;
+  }
+}
+
+// A template is a flat pre-order arena. A receiver validates indices
+// (range, acyclicity) rather than trusting them. An arena rather than an
+// HTML string because the HTML parser reshapes trees, which would make
+// BindPath paths unreliable; a compiler that has the HTML parses it into
+// the arena at build time.
+message RegisterTemplate {
+  uint32 id = 1;
+  repeated TemplateNode nodes = 2;
+  repeated uint32 roots = 3;
+}
+
+// Deep-clone template `tmpl`'s root number `root` as a detached node `id`.
+message CloneTemplate {
+  uint32 tmpl = 1;
+  uint32 root = 2;
+  uint32 id = 3;
+}
+
+// Bind `id` to the interior node of a cloned template reached from `root`
+// by walking child indices in `path` (one byte per step). Positions are
+// reliable here because the producer built the tree. Self-contained: the
+// root is named, not implied.
+message BindPath {
+  uint32 root = 1;
+  bytes path = 2;
+  uint32 id = 3;
+}
+
+// --- Hydration ---
+
+// Bind `id` to the prerendered node the server-side render stamped with
+// `key` (an attribute on elements, a comment beside text nodes and
+// placeholders; the syntax is an SSR/receiver agreement, not part of this
+// stream). By marker rather than by position because the HTML parser
+// reshapes the served tree — <tbody> insertion, <p> auto-close, adjacent
+// text merged — so child indices from the mount root are not trustworthy.
+// A missing key is a receiver error.
+message BindMarker {
+  uint32 key = 1;
+  uint32 id = 2;
+}
+
+message Commit {}
+
+// --- Events ---
+//
+// The payload of handle-event, a typed snapshot whose family the receiver
+// chooses by event name. The set and contents follow polyengine-dioxus's
+// and are to be ported — only enough is sketched here to fix the shape.
+// No case set is the empty payload (e.g. synthetic `mounted`).
+
+message MouseData {
+  double client_x = 1;
+  double client_y = 2;
+  uint32 buttons = 3;
+  uint32 modifiers = 4;
+  optional uint32 related_target = 5;
+}
+
+message KeyboardData {
+  string key = 1;
+  string code = 2;
+  uint32 modifiers = 3;
+  bool repeat = 4;
+}
+
+// The target control's current value, and the whole form's values on
+// `submit`. Fields are a list, not a map: order matters and names repeat
+// (checkbox groups, multi-select).
+message FormField {
+  string name = 1;
+  string value = 2;
+}
+
+message FormData {
+  string value = 1;
+  repeated FormField fields = 2;
+}
+
+message EventPayload {
+  oneof family {
+    MouseData mouse = 1;
+    KeyboardData keyboard = 2;
+    FormData form = 3;
+    // pointer, wheel, drag, touch, scroll, composition, animation,
+    // transition, image, resize, visible: to be ported.
+  }
+}
