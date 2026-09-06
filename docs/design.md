@@ -763,13 +763,32 @@ have. Hence the evolution rule: new meaning is a new field, existing
 fields never change semantics, tags are never reused (protobuf already
 requires the last). Implementation: `receiver/src/policy.ts`.
 
-**What the receiver does not yet guarantee.** Fail-closed on
-*malformed* streams — ids that do not resolve, cycles, out-of-range
-intern or template references, property names that walk the prototype,
-unbounded lengths. `templates.ts` validates the arena; the rest of the
-receiver was written for a trusted spike producer. Hardening it against
-hostile bytes is separate work, and a policy is only as good as the
-receiver behind it.
+**What the receiver guarantees underneath a policy.** A policy is only
+as good as the receiver behind it, so the native receiver fails closed on
+malformed streams independently of any declaration: an id that does not
+resolve, a re-registered live id, a node given two ids, a structural op
+on the mount root (create, move, remove, or the root as an insert anchor
+— the one way to put a producer node beside the mount rather than inside
+it), an intern ref never defined, a `set-text` on an element, an
+attribute or property on a text node, a frame announcing more than
+`MAX_FRAME_BYTES`, a sub-message truncated inside a complete frame.
+Acyclicity is the DOM's own guarantee (`insertBefore` of an ancestor
+throws `HierarchyRequestError`) and is relied on rather than duplicated
+on the insert path. Two things it does not see: an id reused after the
+`remove` that freed it (no record of forgotten ids is kept, and ids need
+not be monotonic), and a template arena deep enough to overflow the
+stack at registration. Gate: `receiver/tests/hostile_test.ts` — a
+structured op fuzzer and a byte-mutation fuzzer over the fixture stream,
+each asserting the mount root and its siblings are untouched after any
+rejection. The remote-dom backend is not hardened.
+
+**Driving the receiver without a component.** `receiver/src/driver.ts`
+is the DOM side on its own — bytes in through `push`, events out through
+a callback, `queries` as plain functions — and `mount.ts` is the
+component glue over it. This is what makes the Transports claim true
+that a receiver outside any component is a first-class implementation:
+a frame applier fed over a `MessagePort`, a replay of a recorded stream,
+and the polyengine mount all drive the same object.
 
 ## Prior art
 
@@ -1111,8 +1130,8 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
     transformer, and remote-dom's reason for existing. *Resolved, see
     "Policy":* the allowlist is the embedder's, not the protocol's; the
     receiver ships the seam and a fail-safe declaration mechanism, no
-    `sanitize` transformer. Hardening the receiver against malformed
-    streams remains open.
+    `sanitize` transformer, and the native receiver fails closed on
+    malformed streams underneath it.
 11. **View-transition batches.** A receiver must call
     `document.startViewTransition` before the first mutation of a batch
     that should animate, so the producer has to say so at the batch start.

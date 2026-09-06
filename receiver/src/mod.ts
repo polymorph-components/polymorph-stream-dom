@@ -41,3 +41,5 @@ export type {
 export { DispatchGate } from "./dispatch.ts";
 export { mount } from "./mount.ts";
 export type { Mounted, MountOptions } from "./mount.ts";
+export { createDriver } from "./driver.ts";
+export type { Driver, DriverOptions, ProducerEventTarget } from "./driver.ts";
