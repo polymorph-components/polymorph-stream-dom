@@ -9,10 +9,12 @@
 // `just bench`, which runs `site` before this).
 
 import { fromFileUrl, join } from "@std/path";
+import { serveDir } from "@std/http/file-server";
 import { generateConfig } from "./tachometer.ts";
 
 const benchDir = fromFileUrl(new URL(".", import.meta.url));
 const resultsDir = join(benchDir, "results");
+const distDir = join(benchDir, "..", "dist");
 
 interface Args {
   sampleSize?: number;
@@ -38,7 +40,17 @@ function parseArgs(argv: string[]): Args {
 
 const args = parseArgs(Deno.args);
 
+// Serve dist/ ourselves on an ephemeral port; see GenerateOptions.baseUrl
+// for why tachometer's own server cannot be used.
+const server = Deno.serve(
+  { port: 0, hostname: "127.0.0.1", onListen: () => {} },
+  (req) => serveDir(req, { fsRoot: distDir, quiet: true }),
+);
+const baseUrl = `http://127.0.0.1:${server.addr.port}`;
+console.log(`serving ${distDir} at ${baseUrl}`);
+
 const config = generateConfig({
+  baseUrl,
   filter: args.filter,
   sampleSize: args.sampleSize,
   chromeBinary: args.chromeBinary,
@@ -63,6 +75,7 @@ const proc = new Deno.Command("npx", {
   stderr: "inherit",
 });
 const result = await proc.output();
+await server.shutdown();
 if (!result.success) {
   console.error("tachometer run failed");
   Deno.exit(1);
