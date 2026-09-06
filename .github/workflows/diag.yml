@@ -5,7 +5,8 @@
 name: diag
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [bench-diag]
 
 concurrency:
   group: diag-${{ github.ref }}
