@@ -15,14 +15,27 @@ hydration) and interoperates with remote-dom at both of its boundaries,
 so remote-dom UIs are producers and remote-dom hosts and host elements
 are receivers and islands. See the design record.
 
-**Status: design stage.** There is no code. Start with
+**Status: first spike.** Two producers run as wasm components on
+[polyengine] in the page and render TodoMVC through a receiver that drives
+Shopify's `DOMRemoteReceiver`: Dioxus via a `WriteMutations` adapter, and
+[Dominator](https://github.com/Pauan/rust-dominator) unmodified via fake
+`wasm-bindgen`/`web-sys` crates over a Rust shadow DOM. Live demos:
+<https://polymorph-components.github.io/polymorph-stream-dom/>. Start with
 [`docs/design.md`](docs/design.md), which records the decisions and their
-reasons. The schema is in two files by layer:
+reasons, and its "Spike" section for what the implementation found. The
+schema is in three files by layer:
 [`proto/stream-dom.proto`](proto/stream-dom.proto) defines every byte on
-the wire (op frames, event payloads; `protoc` parses it), and
+the mutation stream, [`proto/stream-dom-events.proto`](proto/stream-dom-events.proto)
+every event payload (`protoc` parses both), and
 [`wit/stream-dom.wit`](wit/stream-dom.wit) defines what only the component
 model can carry — the stream, the event export, the query imports, the
 `dom-event` resource (`wasm-tools component wit wit/` parses it).
+
+Layout: `crates/` (proto types, the shared guest crate, the Dioxus
+adapter), `guests/dioxus` and `guests/dominator` (the demo components; the
+latter is its own cargo workspace because it `[patch]`es wasm-bindgen),
+`receiver/` (TypeScript receiver + polyengine host glue), `web/` (demo
+site and browser test). `just --list` for the build and test recipes.
 
 The immediate predecessor is
 [polyengine-dioxus](https://github.com/lannbot/polyengine-dioxus), a

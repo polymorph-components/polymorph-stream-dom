@@ -1,0 +1,8 @@
+# Unanchored: nested workspace target/ dirs too.
+target/
+node_modules/
+build/
+dist/
+.playwright/
+test-results/
+playwright-report/

@@ -1,0 +1,19 @@
+# A hand-written stand-in for `js-sys`, holding only what dominator,
+# gloo-events and the todomvc port actually reference. See
+# `../wasm-bindgen/src/lib.rs` for the object protocol everything here
+# dispatches to.
+[package]
+name = "js-sys"
+version = "0.3.105"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wasm-bindgen = { path = "../wasm-bindgen" }
+
+[features]
+# `uuid` (reached via futures-signals -> gensym) writes `js-sys?/std`, and
+# cargo requires the feature to exist even behind the `?`.
+std = []
+default = ["std"]

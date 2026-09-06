@@ -1,0 +1,4 @@
+{
+  "name": "@polymorph/stream-dom-web",
+  "exports": "./entry.ts"
+}

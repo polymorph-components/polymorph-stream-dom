@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>polymorph:stream-dom — demos</title>
+    <style>
+    body {
+      font: 16px/1.5 -apple-system, sans-serif;
+      max-width: 40em;
+      margin: 3em auto;
+      padding: 0 1em;
+    }
+    a {
+      color: #2563eb;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>polymorph:stream-dom demos</h1>
+    <p><a href="./dioxus.html">Dioxus TodoMVC</a> — a Rust/Dioxus app compiled to a
+<code>polymorph:stream-dom</code> producer component.</p>
+    <p><a href="./dominator.html">Dominator TodoMVC</a> — the same TodoMVC app,
+this time built with Rust/Dominator.</p>
+    <p>Both stream their DOM mutations across the same wire into this page's
+receiver, which replays them into a <a href="https://github.com/Shopify/remote-dom">remote-dom</a>
+<code>DOMRemoteReceiver</code>.</p>
+  </body>
+</html>

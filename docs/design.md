@@ -1,6 +1,7 @@
 # polymorph:stream-dom — design record
 
-Status: design stage. Nothing here is implemented. This document records
+Status: first spike implemented (see "Spike" below); the protocol is
+still a draft. This document records
 decisions and their reasons so that later work argues with the reasons
 rather than re-deriving them; it is not a specification. The schema is
 drafted in three files by layer: `proto/stream-dom.proto` for every byte on
@@ -801,12 +802,122 @@ node lookup is implicit in the receiver's marker walk (replaced by explicit
 per-node `bind-marker`); the `WriteMutations` trait as the vocabulary's
 definition.
 
+## Spike
+
+The first implementation: two producers as wasm components on polyengine
+(in-page, no worker yet), one receiver, two TodoMVC demos driven end to
+end by a browser test. Layout: `crates/stream-dom-proto` (prost types from
+the `.proto` files), `crates/stream-dom-guest` (frame encoder, interner, id
+allocator, the outgoing stream, WIT bindings), `crates/stream-dom-dioxus`
+(Dioxus `WriteMutations` adapter), `guests/dominator` (a separate cargo
+workspace: fake `wasm-bindgen`/`js-sys`/`web-sys`/`wasm-bindgen-futures`
+over a Rust shadow DOM, so Dominator runs unmodified), `receiver/` (TS:
+frames → remote-dom records → `DOMRemoteReceiver`, plus polyengine host
+glue), `web/` (the demo site). What it established, and what it argues
+against the record above:
+
+**The remote-dom bring-up receiver works, with two receiver-side choices.**
+`DOMRemoteReceiver`'s `insertChild` of an already-known id is a move
+(`attach` returns the existing node and `insertBefore` relocates it), so
+`insert-before` maps one-to-one and no remove is needed. Listeners do not
+go through remote-dom's event-listener property: its handler ignores
+events whose `target` is not the element itself, which breaks listeners on
+ancestors of the real target. The receiver resolves the real node through
+the receiver's `call` hook and attaches its own listeners — delegated at
+the mount root for bubbling events, direct otherwise — and dispatches once
+per DOM event to the nearest registered ancestor-or-self; the producer
+does its own bubbling. remote-dom has no `setAttributeNS`, so SVG does not
+render through this receiver.
+
+**Direct-access reads settle question 1 for the in-process tier.** The
+receiver reads with polyengine's `readDirect`: the decode-and-apply
+callback runs synchronously inside the write rendezvous, over a view of
+guest memory, so the whole batch is applied before the guest's write
+completes. A producer that awaits its flush and then runs after-commit
+effects (Dominator's `focus()` becomes a `set-focus` query after the
+batch) observes the applied DOM; no receiver-side buffering until `commit`
+was needed.
+
+**`insert-before` requiring `parent` when `anchor` is present is the
+protocol's main friction.** Dioxus's `WriteMutations` never names a
+parent (the DOM's `insertBefore` does not need one). Resolving it cost the
+adapter two maps plus lazy `bind-path` frames for unnamed template
+interiors — e.g. a footer's placeholder at path `[1, 0]` needs its parent
+`[1]` bound purely so `insert-before` can name it; two frames where the
+anchor alone would do. Making `parent` optional when `anchor` is set
+deletes that mechanism. The coalescer argument for a mandatory parent is
+weaker than it looked: an op that names its anchor already names the
+subtree it touches. Open question 13.
+
+**No `insert-after` costs a move per keyed-list append.** Dioxus's
+`insert_nodes_after(anchor, m)` is expressed as `insert-before(…, anchor)`
+for the new nodes then one `insert-before` moving the anchor back in front
+of them; the alternative is an ordered producer-side shadow tree just to
+learn a next sibling. Open question 13.
+
+**`window` and `document` are not addressable.** Dominator's routing
+(`popstate` on `window`) and media queries register listeners on nodes the
+protocol cannot name; the shim panics rather than emit a listener for an
+undefined id. Framework-level global listeners (`resize`, `popstate`,
+`visibilitychange`, media queries) have nowhere to go; the `resize`
+synthetic covers one. Open question 14.
+
+**Fine-grained commit boundaries fell out of the scheduler.** Dominator's
+signals run in spawned futures; the shim sets a dirty flag on every
+mutation and a flusher task sends one batch per scheduler turn, then runs
+after-commit effects. `handle-event` flushes inline before returning. This
+is the "whatever flushed in this microtask" boundary predicted under
+"Producer seams", with no producer-side policy.
+
+**The fake-`web_sys` strategy holds for a fine-grained framework, with a
+measured surface.** Dominator's TodoMVC needs 40 `web_sys` types and about
+110 methods; roughly 35 of those must panic in the shim (every layout
+read, `Storage`, `Location`, `History`, `requestAnimationFrame`,
+`matchMedia`). The structural subset — create/insert/remove, attribute,
+property, `classList`, `style`, listeners — is small, as predicted. The
+unbudgeted cost was the CSSOM: Dominator's `class!` builds a `<style>` in
+`<head>` and drives `insertRule`, so the shim models a stylesheet and
+returns the mount root for `document.head`. No proc macro was needed
+because Dominator's graph has no `#[wasm_bindgen]` extern blocks. Leptos
+is not reachable this way: `leptos` depends on `server_fn` → `gloo-net` →
+`wasm-streams`, all with extern blocks, so a hand-written fake `web-sys`
+cannot compile it. The route that would is a fake `wasm-bindgen` whose
+macro turns extern blocks into dynamic dispatch by `js_name` over a
+Rust-side object runtime, letting the real `web-sys`/`js-sys` compile
+unmodified; recorded, not built. Question 8's answer is therefore Dominator
+(fine-grained) plus Dioxus (diffing), not Leptos.
+
+**The producer's attribute-vs-property table has to include the
+framework's coercions, not just its name list.** Dioxus renders
+`checked: "{bool}"` as the string `"false"`; dioxus-web's interpreter
+applies `truthy(value)` before assigning the boolean property, and an
+adapter that forwards the string sets `checked = "false"`, which is true.
+The adapter now mirrors dioxus-web's `setAttributeInner` arm for arm.
+Relatedly, an absent `set-property` value is applied by the receiver as
+`null`, not `undefined`: `value` and `innerHTML` are
+`[LegacyNullToEmptyString]`, and `undefined` would become the string
+`"undefined"`.
+
+**A Dioxus producer emits no declarative listener flags.** Its handlers
+call `prevent_default()` imperatively, so `prevent-default` /
+`stop-propagation` on `add-listener` are always false; option C in
+"Events" gets nothing from this producer, and a remote receiver would have
+to fall back to a per-event-type default policy.
+
+Not built: hydration (`run(hydrate = true)` traps), the coalescer, any
+worker or network tier, the conformance corpus (only a single encoder
+fixture cross-checked by the TS decoder), namespaces through remote-dom,
+event families beyond mouse/keyboard/form, files and `DataTransfer`.
+
 ## Open questions
 
 1. **Drain-within-one-task.** Does the embedding resume a writer's fiber
    synchronously on partial-write completion, so a same-thread receiver can
    apply a whole batch without a rendering opportunity? Decides whether
-   receivers ever need to buffer until `commit`.
+   receivers ever need to buffer until `commit`. *Answered for polyengine
+   in-process by the spike:* a `readDirect` consumer applies the batch
+   inside the rendezvous, before the write completes. Still open for the
+   chunked read path and for other embeddings.
 2. **Option A backpressure hazard.** How often is a producer instance under
    backpressure when a DOM event arrives, with a stackful scheduler? If
    "essentially never", A + C is settled.
@@ -830,10 +941,12 @@ definition.
    tooling; first thing to build. Seed the edge cases from rrweb's list
    (`<input>` value vs attribute, `<textarea>` content, `<select>`
    selection, adjacent text nodes, `<canvas>`, shadow roots).
-8. **First producer.** Leptos (tachys `Renderer`) if its renderer is still
-   pluggable in current releases, else Sycamore; Dioxus as the diffing
-   counterpart. A fine-grained first producer exercises templates,
-   `bind-path` and small-batch coalescing, which a VDOM producer would not.
+8. **First producer.** *Settled by the spike:* Dominator (fine-grained,
+   through the fake-`web_sys` layer) and Dioxus (diffing, through
+   `WriteMutations`). Leptos's renderer is not pluggable (tachys hard-codes
+   `Rndr = Dom`) and its dependency graph blocks the hand-written fake; it
+   needs the fake-`wasm-bindgen` route described under "Spike". Templates
+   are exercised only by Dioxus so far; Dominator emits none.
 9. **Shadow DOM and CSSOM.** No `attach-shadow`, no `adoptedStyleSheets`,
    no `insertRule`. Lit and every web-component framework need the first
    two; rrweb and remote-dom both added shadow-root support after
@@ -862,3 +975,19 @@ definition.
     namespaces, imperative `preventDefault` and the wasm-native path —
     sufficient, but the record should then say so instead of leaning on
     mount cost.
+13. **`insert-before`'s `parent`, and an `insert-after`.** The spike's
+    Dioxus adapter pays two maps and extra `bind-path` frames to name a
+    parent the anchor already implies, and one move op per keyed-list
+    append for want of an insert-after. Candidates: make `parent` optional
+    when `anchor` is present (a receiver uses `anchor.parentNode`; a
+    coalescer keys on the anchor's subtree), and add
+    `insert-after(parent?, id, anchor)`. Both are additive on the wire.
+    Decide against the coalescer's key design (question 4) rather than
+    per producer.
+14. **Global listeners.** `window` and `document` have no id, so
+    framework-level `popstate`, `visibilitychange`, window `resize` and
+    media-query listeners cannot be registered. Options: reserve ids for
+    `window`/`document` (they are receiver-side singletons a producer can
+    name without creating), or more synthetic families on the mount root
+    like `resize`. The reserved-id shape is the smaller change and matches
+    how `0` already names the mount root.

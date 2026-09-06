@@ -1,0 +1,49 @@
+# The Dominator guest: its own cargo workspace.
+#
+# Separate from the root workspace because `[patch.crates-io]` applies
+# workspace-wide and this one replaces wasm-bindgen, js-sys, web-sys and
+# wasm-bindgen-futures with the fake-DOM shims. The Dioxus guest in the
+# root workspace pulls the *real* wasm-bindgen (via subsecond, as dead
+# code) and must not see them. Root Cargo.toml `exclude`s this directory.
+#
+# The strategy under test (docs/design.md "Producer seams" -> "Wasm-native
+# producers", the Dominator row): a framework that talks to `web_sys`
+# directly runs unmodified as a wasm component because `web_sys` is
+# replaced by a recording fake backed by a Rust-side shadow DOM. Dominator
+# 0.5.38's dependency graph contains zero `#[wasm_bindgen]` macro uses, so
+# no proc macro has to be faked -- which is why it is the framework here.
+
+[workspace]
+resolver = "2"
+members = [
+  "shims/wasm-bindgen",
+  "shims/js-sys",
+  "shims/web-sys",
+  "shims/wasm-bindgen-futures",
+  "fakedom",
+  "todomvc",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# The whole point: every `wasm-bindgen` / `js-sys` / `web-sys` /
+# `wasm-bindgen-futures` dependency anywhere in the graph (dominator,
+# gloo-events, the todomvc port) resolves to the shim. `cargo tree -i
+# wasm-bindgen` is the gate that proves the registry crate never appears.
+[patch.crates-io]
+wasm-bindgen = { path = "shims/wasm-bindgen" }
+js-sys = { path = "shims/js-sys" }
+web-sys = { path = "shims/web-sys" }
+wasm-bindgen-futures = { path = "shims/wasm-bindgen-futures" }
+
+# Copied from the root manifest: the component build wants the same
+# codegen settings on both guests.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

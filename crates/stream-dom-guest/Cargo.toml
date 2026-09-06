@@ -1,0 +1,12 @@
+[package]
+name = "stream-dom-guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+stream-dom-proto = { path = "../stream-dom-proto" }
+prost.workspace = true
+wit-bindgen.workspace = true
+rustc-hash.workspace = true

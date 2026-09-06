@@ -1,0 +1,32 @@
+[package]
+name = "stream-dom-dioxus"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+stream-dom-guest = { path = "../stream-dom-guest" }
+dioxus-core = "=0.7.10"
+# `event_bubbles` lives in dioxus-core-types (a zero-dep root crate), NOT in
+# dioxus-html; it is already in the tree via dioxus-core, so naming it
+# directly costs nothing. (Same reason as polyengine-dioxus's Cargo.toml.)
+dioxus-core-types = "=0.7.10"
+dioxus-html = { version = "=0.7.10", default-features = false }
+# already in the tree via dioxus-core; used for the writer's bookkeeping maps.
+rustc-hash.workspace = true
+# `spawn_local` / `StreamReader` for the driver, which is wasm32-only —
+# but the dependency itself is unconditional because stream-dom-guest
+# already pulls wit-bindgen in on every target.
+wit-bindgen.workspace = true
+
+[dev-dependencies]
+# Native-only: `rsx!` for driving a real VirtualDom through the writer in unit
+# tests. Dev-dependencies do not enter the wasm32 component build.
+dioxus = { version = "=0.7.10", default-features = false, features = [
+  "macro",
+  "html",
+  "signals",
+  "hooks",
+] }
+prost.workspace = true
