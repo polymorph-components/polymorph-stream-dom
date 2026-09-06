@@ -38,8 +38,11 @@ for (const name of components) {
 await Deno.remove(distDir, { recursive: true }).catch(() => {});
 await ensureDir(distDir);
 
-// Bundle the browser entries.
-for (const entry of ["entry", "bench"]) {
+// Bundle the browser entries. The bench bundle is NOT named bench.js:
+// tachometer's server reserves `/bench.js` for its own callback-mode
+// client helper and serves that instead of the file on disk, so a bundle
+// of that name never runs under it.
+for (const [entry, out] of [["entry", "entry"], ["bench", "bench-runner"]]) {
   const bundle = new Deno.Command(Deno.execPath(), {
     args: [
       "bundle",
@@ -48,7 +51,7 @@ for (const entry of ["entry", "bench"]) {
       "--minify",
       join(webDir, `${entry}.ts`),
       "-o",
-      join(distDir, `${entry}.js`),
+      join(distDir, `${out}.js`),
     ],
     cwd: root,
     stdout: "inherit",
