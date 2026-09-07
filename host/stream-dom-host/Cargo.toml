@@ -10,9 +10,9 @@ publish.workspace = true
 # and `runtime` are the compile and execute halves. Everything else the
 # default feature set carries (gc, cache, profiling, coredump, wat, ...) is
 # unused here, hence `default-features = false`.
-wasmtime = { version = "47", default-features = false, features = [
+wasmtime = { version = "48", default-features = false, features = [
   "component-model-async",
-  # `Error::from_anyhow`: wasmtime 47 has its own `Error` type, and the
+  # `Error::from_anyhow`: wasmtime 48 has its own `Error` type, and the
   # public API of this crate speaks `anyhow`.
   "anyhow",
   "cranelift",
@@ -20,7 +20,7 @@ wasmtime = { version = "47", default-features = false, features = [
   "std",
 ] }
 # p2 WASI: the guest imports `wasi:{io,clocks,cli,random}@0.2.9`.
-wasmtime-wasi = "47"
+wasmtime-wasi = "48"
 anyhow = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 log = "0.4"
