@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788733920059,
+  "lastUpdate": 1788784779072,
   "repoUrl": "https://github.com/polymorph-components/polymorph-stream-dom",
   "entries": {
     "Benchmark": [
@@ -1679,6 +1679,246 @@ window.BENCHMARK_DATA = {
             "name": "dominator-bench/remote/direct/clear",
             "value": 196.85999999999768,
             "range": "± 11.123",
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "lannbot@lannbox.com",
+            "name": "Lann(bot)",
+            "username": "lannbot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "260829170ef3787f37fa4afb14390598dc0fa2d7",
+          "message": "Merge pull request #18 from polymorph-components/bump/wasmtime-48\n\nUpgrade the wasmtime host to wasmtime 48",
+          "timestamp": "2026-09-07T08:33:39-04:00",
+          "tree_id": "0223c60214a986dc9687248cc38fd1a4ec95045a",
+          "url": "https://github.com/polymorph-components/polymorph-stream-dom/commit/260829170ef3787f37fa4afb14390598dc0fa2d7"
+        },
+        "date": 1788784777327,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "dioxus-bench/native/direct/create-1k",
+            "value": 62.726666666666276,
+            "range": "± 1.803",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/replace-1k",
+            "value": 52.94666666667133,
+            "range": "± 3.353",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/create-10k",
+            "value": 319.91333333332636,
+            "range": "± 7.779",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/append-1k",
+            "value": 46.193333333332944,
+            "range": "± 1.511",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/update-every-10th",
+            "value": 5.17333333332596,
+            "range": "± 0.363",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/select-row",
+            "value": 4.906666666663174,
+            "range": "± 0.39",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/swap-rows",
+            "value": 6.086666666669771,
+            "range": "± 0.418",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/remove-row",
+            "value": 4.839999999994567,
+            "range": "± 0.277",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/native/direct/clear",
+            "value": 108.13999999999263,
+            "range": "± 0.984",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/create-1k",
+            "value": 79.3466666666655,
+            "range": "± 3.387",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/replace-1k",
+            "value": 67.77333333333178,
+            "range": "± 1.973",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/create-10k",
+            "value": 436.46000000000544,
+            "range": "± 8.5",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/append-1k",
+            "value": 65.03333333332752,
+            "range": "± 1.831",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/update-every-10th",
+            "value": 5.093333333332946,
+            "range": "± 0.284",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/select-row",
+            "value": 5.219999999997284,
+            "range": "± 0.347",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/swap-rows",
+            "value": 5.38666666666007,
+            "range": "± 0.311",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/remove-row",
+            "value": 4.959999999997672,
+            "range": "± 0.305",
+            "unit": "ms"
+          },
+          {
+            "name": "dioxus-bench/remote/direct/clear",
+            "value": 167.2866666666659,
+            "range": "± 5.213",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/create-1k",
+            "value": 91.11333333333411,
+            "range": "± 2.126",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/replace-1k",
+            "value": 75.80666666665735,
+            "range": "± 1.957",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/create-10k",
+            "value": 519.3533333333287,
+            "range": "± 12.683",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/append-1k",
+            "value": 66.6466666666655,
+            "range": "± 3.161",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/update-every-10th",
+            "value": 1.3666666666647265,
+            "range": "± 0.177",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/select-row",
+            "value": 1.1599999999957313,
+            "range": "± 0.075",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/swap-rows",
+            "value": 1.073333333339542,
+            "range": "± 0.077",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/remove-row",
+            "value": 1.820000000006985,
+            "range": "± 0.084",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/native/direct/clear",
+            "value": 164.36666666666667,
+            "range": "± 3.739",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/create-1k",
+            "value": 109.69333333333682,
+            "range": "± 3.468",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/replace-1k",
+            "value": 98.10666666666317,
+            "range": "± 4.734",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/create-10k",
+            "value": 697.7666666666686,
+            "range": "± 19.563",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/append-1k",
+            "value": 88.20666666666511,
+            "range": "± 3.481",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/update-every-10th",
+            "value": 1.2799999999949554,
+            "range": "± 0.067",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/select-row",
+            "value": 1.1999999999980597,
+            "range": "± 0.069",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/swap-rows",
+            "value": 1.0600000000034924,
+            "range": "± 0.058",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/remove-row",
+            "value": 1.6466666666674428,
+            "range": "± 0.046",
+            "unit": "ms"
+          },
+          {
+            "name": "dominator-bench/remote/direct/clear",
+            "value": 205.81333333333217,
+            "range": "± 15.227",
             "unit": "ms"
           }
         ]
