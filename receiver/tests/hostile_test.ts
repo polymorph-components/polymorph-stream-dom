@@ -13,7 +13,8 @@ import { assert } from "@std/assert";
 import { parseHTML } from "linkedom";
 import { FrameDecoder, MAX_FRAME_BYTES } from "../src/frames.ts";
 import { NativeDomReceiver } from "../src/native.ts";
-import { Writer } from "../src/proto.ts";
+import { BinaryWriter, WireType } from "@bufbuild/protobuf/wire";
+import { frame as framed, stream } from "./wire.ts";
 
 // -- deterministic PRNG ---------------------------------------------------
 
@@ -118,32 +119,37 @@ function assertMountIntact(h: Harness, where: string): void {
 
 // -- frame encoding -------------------------------------------------------
 
-/** One length-delimited `Frame`, as the stream layout specifies (varint
- * byte length, then the message). */
-function frame(build: (w: Writer) => void): Uint8Array {
-  const body = (() => {
-    const w = new Writer();
-    build(w);
-    return w.finish();
-  })();
-  const lp = new Writer();
-  lp.writeVarint32(body.length);
-  const prefix = lp.finish();
-  const out = new Uint8Array(prefix.length + body.length);
-  out.set(prefix, 0);
-  out.set(body, prefix.length);
-  return out;
+/** Hostile fixtures are written field by field with `BinaryWriter`
+ * directly rather than through the generated `Frame` writer: the point of
+ * the generator below is to emit field combinations no valid message
+ * object can express (absent required-ish fields, unknown enum values,
+ * repeated oneof arms). These four helpers are the whole vocabulary. */
+type Build = (w: BinaryWriter) => void;
+
+function msg(w: BinaryWriter, field: number, build: Build): void {
+  w.tag(field, WireType.LengthDelimited).fork();
+  build(w);
+  w.join();
 }
 
-function concat(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
+function u32(w: BinaryWriter, field: number, v: number): void {
+  w.tag(field, WireType.Varint).uint32(v);
+}
+
+function str(w: BinaryWriter, field: number, v: string): void {
+  w.tag(field, WireType.LengthDelimited).string(v);
+}
+
+function bool(w: BinaryWriter, field: number, v: boolean): void {
+  w.tag(field, WireType.Varint).bool(v);
+}
+
+/** One length-delimited `Frame`, as the stream layout specifies (varint
+ * byte length, then the message). */
+function frame(build: Build): Uint8Array {
+  const w = new BinaryWriter();
+  build(w);
+  return framed(w.finish());
 }
 
 // Frame.op field numbers (proto/stream-dom.proto).
@@ -223,27 +229,27 @@ Deno.test("hostile: random op sequences never damage the embedder's DOM", () => 
     const ref = () => rand() < HOSTILE_RATE ? pick(badRefs) : pick(goodRefs);
     const frames: Uint8Array[] = [
       frame((w) =>
-        w.writeMessage(F_INTERN, (m) => {
-          m.writeUint32(1, 1);
-          m.writeString(2, "div");
+        msg(w, F_INTERN, (m) => {
+          u32(m, 1, 1);
+          str(m, 2, "div");
         })
       ),
       frame((w) =>
-        w.writeMessage(F_INTERN, (m) => {
-          m.writeUint32(1, 2);
-          m.writeString(2, "span");
+        msg(w, F_INTERN, (m) => {
+          u32(m, 1, 2);
+          str(m, 2, "span");
         })
       ),
       frame((w) =>
-        w.writeMessage(F_INTERN, (m) => {
-          m.writeUint32(1, 3);
-          m.writeString(2, "class");
+        msg(w, F_INTERN, (m) => {
+          u32(m, 1, 3);
+          str(m, 2, "class");
         })
       ),
       frame((w) =>
-        w.writeMessage(F_INTERN, (m) => {
-          m.writeUint32(1, 4);
-          m.writeString(2, "click");
+        msg(w, F_INTERN, (m) => {
+          u32(m, 1, 4);
+          str(m, 2, "click");
         })
       ),
     ];
@@ -253,15 +259,15 @@ Deno.test("hostile: random op sequences never damage the embedder's DOM", () => 
     for (let k = 0; k < 3; k++) {
       const id = newId(true);
       frames.push(frame((w) =>
-        w.writeMessage(F_CREATE_ELEMENT, (m) => {
-          m.writeUint32(1, id);
-          m.writeUint32(2, 1);
+        msg(w, F_CREATE_ELEMENT, (m) => {
+          u32(m, 1, id);
+          u32(m, 2, 1);
         })
       ));
       frames.push(frame((w) =>
-        w.writeMessage(F_INSERT_BEFORE, (m) => {
-          m.writeUint32(1, k === 0 ? 0 : k);
-          m.writeUint32(2, id);
+        msg(w, F_INSERT_BEFORE, (m) => {
+          u32(m, 1, k === 0 ? 0 : k);
+          u32(m, 2, id);
         })
       ));
     }
@@ -270,46 +276,43 @@ Deno.test("hostile: random op sequences never damage the embedder's DOM", () => 
       switch (int(15)) {
         case 0:
           frames.push(frame((w) =>
-            w.writeMessage(F_CREATE_ELEMENT, (m) => {
-              m.writeUint32(1, newId(true));
-              m.writeUint32(2, ref());
-              if (rand() < 0.3) m.writeUint32(3, ref());
+            msg(w, F_CREATE_ELEMENT, (m) => {
+              u32(m, 1, newId(true));
+              u32(m, 2, ref());
+              if (rand() < 0.3) u32(m, 3, ref());
             })
           ));
           break;
         case 1:
           frames.push(frame((w) =>
-            w.writeMessage(F_CREATE_TEXT, (m) => {
-              m.writeUint32(1, newId(false));
-              m.writeString(2, "t" + i);
+            msg(w, F_CREATE_TEXT, (m) => {
+              u32(m, 1, newId(false));
+              str(m, 2, "t" + i);
             })
           ));
           break;
         case 2:
           frames.push(
             frame((w) =>
-              w.writeMessage(
-                F_CREATE_PLACEHOLDER,
-                (m) => m.writeUint32(1, newId(false)),
-              )
+              msg(w, F_CREATE_PLACEHOLDER, (m) => u32(m, 1, newId(false)))
             ),
           );
           break;
         case 3:
           frames.push(frame((w) =>
-            w.writeMessage(F_INSERT_BEFORE, (m) => {
-              if (rand() < 0.75) m.writeUint32(1, parent());
-              m.writeUint32(2, target());
-              if (rand() < 0.25) m.writeUint32(3, target());
+            msg(w, F_INSERT_BEFORE, (m) => {
+              if (rand() < 0.75) u32(m, 1, parent());
+              u32(m, 2, target());
+              if (rand() < 0.25) u32(m, 3, target());
             })
           ));
           break;
         case 4:
           frames.push(frame((w) =>
-            w.writeMessage(F_INSERT_AFTER, (m) => {
-              if (rand() < 0.75) m.writeUint32(1, parent());
-              m.writeUint32(2, target());
-              m.writeUint32(3, target());
+            msg(w, F_INSERT_AFTER, (m) => {
+              if (rand() < 0.75) u32(m, 1, parent());
+              u32(m, 2, target());
+              u32(m, 3, target());
             })
           ));
           break;
@@ -318,123 +321,125 @@ Deno.test("hostile: random op sequences never damage the embedder's DOM", () => 
           const at = live.indexOf(gone);
           if (at >= 0) live.splice(at, 1);
           frames.push(
-            frame((w) =>
-              w.writeMessage(F_REMOVE, (m) => m.writeUint32(1, gone))
-            ),
+            frame((w) => msg(w, F_REMOVE, (m) => u32(m, 1, gone))),
           );
           break;
         }
         case 6:
           frames.push(frame((w) =>
-            w.writeMessage(F_SET_TEXT, (m) => {
-              m.writeUint32(1, target());
-              m.writeString(2, "x" + i);
+            msg(w, F_SET_TEXT, (m) => {
+              u32(m, 1, target());
+              str(m, 2, "x" + i);
             })
           ));
           break;
         case 7:
           frames.push(frame((w) =>
-            w.writeMessage(F_SET_ATTRIBUTE, (m) => {
-              m.writeUint32(1, target());
-              m.writeUint32(2, ref());
-              if (rand() < 0.3) m.writeUint32(3, ref());
-              if (rand() < 0.7) m.writeString(4, "v" + i);
+            msg(w, F_SET_ATTRIBUTE, (m) => {
+              u32(m, 1, target());
+              u32(m, 2, ref());
+              if (rand() < 0.3) u32(m, 3, ref());
+              if (rand() < 0.7) str(m, 4, "v" + i);
             })
           ));
           break;
         case 8:
           frames.push(frame((w) =>
-            w.writeMessage(F_SET_PROPERTY, (m) => {
-              m.writeUint32(1, target());
-              m.writeUint32(2, ref());
-              if (rand() < 0.5) m.writeString(3, "v" + i);
-              else m.writeBool(6, rand() < 0.5);
+            msg(w, F_SET_PROPERTY, (m) => {
+              u32(m, 1, target());
+              u32(m, 2, ref());
+              if (rand() < 0.5) str(m, 3, "v" + i);
+              else bool(m, 6, rand() < 0.5);
             })
           ));
           break;
         case 9:
-          frames.push(frame((w) =>
-            w.writeMessage(
-              rand() < 0.5 ? F_ADD_LISTENER : F_REMOVE_LISTENER,
-              (m) =>
-                m.writeMessage(1, (l) => {
-                  if (rand() < 0.8) l.writeUint32(1, target());
-                  else l.writeUint32(8, int(3)); // Global, sometimes unknown
-                  l.writeUint32(2, ref());
-                  l.writeBool(3, rand() < 0.5);
-                }),
-            )
-          ));
+          frames.push(
+            frame((w) =>
+              msg(
+                w,
+                rand() < 0.5 ? F_ADD_LISTENER : F_REMOVE_LISTENER,
+                (m) =>
+                  msg(m, 1, (l) => {
+                    if (rand() < 0.8) {
+                      u32(l, 1, target());
+                    } else u32(l, 8, int(3)); // Global, sometimes unknown
+                    u32(l, 2, ref());
+                    bool(l, 3, rand() < 0.5);
+                  }),
+              )
+            ),
+          );
           break;
         case 10:
           // A template arena with random (often out-of-range or cyclic)
           // child indices.
           frames.push(frame((w) =>
-            w.writeMessage(F_REGISTER_TEMPLATE, (m) => {
-              m.writeUint32(1, int(3));
+            msg(w, F_REGISTER_TEMPLATE, (m) => {
+              u32(m, 1, int(3));
               const n = 1 + int(4);
               for (let k = 0; k < n; k++) {
-                m.writeMessage(2, (tn) => {
+                msg(m, 2, (tn) => {
                   if (rand() < 0.6) {
-                    tn.writeMessage(1, (el) => {
-                      el.writeUint32(1, ref());
+                    msg(tn, 1, (el) => {
+                      u32(el, 1, ref());
                       if (rand() < 0.5) {
-                        el.writeMessage(3, (at) => {
-                          at.writeUint32(1, ref());
-                          at.writeString(3, "a");
+                        msg(el, 3, (at) => {
+                          u32(at, 1, ref());
+                          str(at, 3, "a");
                         });
                       }
                       for (let c = 0; c < int(3); c++) {
-                        el.writeUint32(4, int(6));
+                        u32(el, 4, int(6));
                       }
                     });
-                  } else if (rand() < 0.5) tn.writeString(2, "t");
-                  else tn.writeMessage(3, () => {});
+                  } else if (rand() < 0.5) str(tn, 2, "t");
+                  else msg(tn, 3, () => {});
                 });
               }
-              m.writeUint32(3, int(4));
+              u32(m, 3, int(4));
             })
           ));
           break;
         case 11:
           frames.push(frame((w) =>
-            w.writeMessage(F_CLONE_TEMPLATE, (m) => {
-              m.writeUint32(1, int(4));
-              m.writeUint32(2, int(4));
-              m.writeUint32(3, newId(true));
+            msg(w, F_CLONE_TEMPLATE, (m) => {
+              u32(m, 1, int(4));
+              u32(m, 2, int(4));
+              u32(m, 3, newId(true));
             })
           ));
           break;
         case 12:
           frames.push(frame((w) =>
-            w.writeMessage(F_BIND_PATH, (m) => {
-              m.writeUint32(1, target());
+            msg(w, F_BIND_PATH, (m) => {
+              u32(m, 1, target());
               // BindPath.path is `bytes`; each step is written as a
               // one-byte varint, which is byte-identical to the raw byte
               // for values < 128 — the only range used here.
-              m.writeMessage(2, (p) => {
-                for (let s = 0; s < int(4); s++) p.writeVarint32(int(4));
+              msg(m, 2, (p) => {
+                for (let s = 0; s < int(4); s++) p.uint32(int(4));
               });
-              m.writeUint32(3, newId(true));
+              u32(m, 3, newId(true));
             })
           ));
           break;
         case 13:
           frames.push(frame((w) =>
-            w.writeMessage(F_BIND_MARKER, (m) => {
-              m.writeUint32(1, int(4));
-              m.writeUint32(2, newId(false));
+            msg(w, F_BIND_MARKER, (m) => {
+              u32(m, 1, int(4));
+              u32(m, 2, newId(false));
             })
           ));
           break;
         default:
-          frames.push(frame((w) => w.writeBool(F_COMMIT, true)));
+          frames.push(frame((w) => bool(w, F_COMMIT, true)));
       }
     }
 
     // Feed the whole stream in chunks split at random byte boundaries: a
     // frame straddling a chunk must behave exactly as one that does not.
-    const bytes = concat(frames);
+    const bytes = stream(...frames);
     let at = 0;
     let threw = false;
     while (at < bytes.length && !threw) {
@@ -496,7 +501,7 @@ Deno.test("hostile: byte mutations of basic.pb neither hang nor damage the mount
         const at = int(bytes.length);
         const junk = new Uint8Array(1 + int(8));
         for (let k = 0; k < junk.length; k++) junk[k] = int(256);
-        bytes = concat([bytes.subarray(0, at), junk, bytes.subarray(at)]);
+        bytes = stream(bytes.subarray(0, at), junk, bytes.subarray(at));
         break;
       }
       default: { // replace a byte outright (hits length prefixes hardest)
@@ -537,11 +542,9 @@ Deno.test("hostile: byte mutations of basic.pb neither hang nor damage the mount
 
 Deno.test("FrameDecoder: a length prefix over MAX_FRAME_BYTES throws instead of buffering forever", () => {
   const h = harness();
-  const lp = new Writer();
-  lp.writeVarint32(MAX_FRAME_BYTES + 1);
   let caught: unknown;
   try {
-    h.decoder.push(lp.finish());
+    h.decoder.push(new BinaryWriter().uint32(MAX_FRAME_BYTES + 1).finish());
   } catch (err) {
     caught = err;
   }
@@ -552,26 +555,98 @@ Deno.test("FrameDecoder: a length prefix over MAX_FRAME_BYTES throws instead of 
   );
   // A length just under the bound is still "wait for more bytes", not an
   // error — the bound is a ceiling, not a size limit on real frames.
-  const ok = new Writer();
-  ok.writeVarint32(MAX_FRAME_BYTES);
-  harness().decoder.push(ok.finish());
+  harness().decoder.push(
+    new BinaryWriter().uint32(MAX_FRAME_BYTES).finish(),
+  );
 });
 
 Deno.test("FrameDecoder: a truncated sub-message inside a COMPLETE frame is an error, not a wait", () => {
   const h = harness();
   // Frame { create_text: <length says 20 bytes, only 2 follow> }, wrapped
-  // in a frame length prefix that is itself correct. Only the length probe
-  // in `#drain` may treat a truncation as "wait for more"; inside a frame
-  // whose bytes are all present, it is a malformed frame.
+  // in a frame length prefix that is itself correct, and followed by a
+  // perfectly good frame. Only the length probe in `#drain` may treat a
+  // truncation as "wait for more"; inside a frame whose bytes are all
+  // present it is a malformed frame — and the frame AFTER it must not be
+  // applied either, since the throw aborts the stream.
   const body = Uint8Array.of((F_CREATE_TEXT << 3) | 2, 20, 0x08, 0x01);
-  const lp = new Writer();
-  lp.writeVarint32(body.length);
+  const good = frame((w) =>
+    msg(w, F_CREATE_TEXT, (m) => {
+      u32(m, 1, 9);
+      str(m, 2, "ok");
+    })
+  );
   let caught: unknown;
   try {
-    h.decoder.push(concat([lp.finish(), body]));
+    h.decoder.push(stream(framed(body), good));
   } catch (err) {
     caught = err;
   }
   assert(caught instanceof Error, "expected an Error, got " + String(caught));
+  assert(
+    h.recv.resolveNode(9) === undefined,
+    "the frame after the malformed one was applied",
+  );
   assertMountIntact(h, "truncated sub-message");
+});
+
+Deno.test("FrameDecoder: a sub-message length that overruns the frame does not read into the next frame", () => {
+  const h = harness();
+  // `Frame { create_text: <length says 16, only 6 bytes are inside this
+  // frame> }`: the frame's own length prefix is honest about those 6
+  // bytes, so the over-long inner length can only be satisfied by reading
+  // the FOLLOWING frames' bytes. Without a per-frame bound the decoder
+  // does exactly that and then resumes at the right place, applying both
+  // frames from bytes that were never one frame.
+  const overrun = frame((w) => {
+    w.tag(F_CREATE_TEXT, WireType.LengthDelimited).uint32(16).raw(
+      Uint8Array.of(0x08, 0x05, 0x12, 0x02, 0x68, 0x69), // id 5, text "hi"
+    );
+  });
+  const good = frame((w) => {
+    msg(w, F_CREATE_TEXT, (m) => {
+      u32(m, 1, 9);
+      str(m, 2, "abcdefghijklmnop");
+    });
+    bool(w, F_COMMIT, true);
+  });
+  let caught: unknown;
+  try {
+    h.decoder.push(stream(overrun, good));
+  } catch (err) {
+    caught = err;
+  }
+  assert(caught instanceof Error, "expected an Error, got " + String(caught));
+  assert(
+    h.recv.resolveNode(5) === undefined,
+    "the malformed frame reached the sink",
+  );
+  assert(
+    h.recv.resolveNode(9) === undefined,
+    "the frame after the malformed one was applied",
+  );
+  assertMountIntact(h, "over-long sub-message length");
+});
+
+Deno.test("FrameDecoder: a frame body that stops short of its own length is an error in both modes", () => {
+  // `Frame { commit: true }` followed by a zero tag and junk: the
+  // generated decoder stops at the zero tag WITHOUT throwing, leaving the
+  // reader inside the frame. Field number 0 does not exist in protobuf,
+  // so this is malformed wire, not a skippable unknown — rejected in
+  // strict and open mode alike.
+  const body = Uint8Array.of(0x08, 0x01, 0x00, 0xff, 0xff, 0xff);
+  for (const strict of [false, true]) {
+    const h = harness();
+    const decoder = new FrameDecoder(h.recv.sink, { strict });
+    let caught: unknown;
+    try {
+      decoder.push(framed(body));
+    } catch (err) {
+      caught = err;
+    }
+    assert(
+      caught instanceof Error,
+      `strict=${strict}: expected an Error, got ${String(caught)}`,
+    );
+    assertMountIntact(h, `short frame body (strict=${strict})`);
+  }
 });

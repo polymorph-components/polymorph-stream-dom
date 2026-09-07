@@ -1,6 +1,5 @@
 // Re-exports for `@polymorph/stream-dom-receiver`.
 
-export { Reader, WireType, Writer } from "./proto.ts";
 export { FrameDecoder, PROTOCOL_VERSION } from "./frames.ts";
 export type {
   AttrValue,

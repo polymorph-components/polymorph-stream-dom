@@ -10,7 +10,8 @@ import { parseHTML } from "linkedom";
 import { createDriver } from "../src/driver.ts";
 import { PolicyError } from "../src/policy.ts";
 import { desktopPolicy } from "../src/policy-desktop.ts";
-import { Writer } from "../src/proto.ts";
+import { Frame } from "../src/gen/stream-dom.ts";
+import { frame as framed, stream } from "./wire.ts";
 
 // -- unit harness ----------------------------------------------------------
 
@@ -749,80 +750,28 @@ Deno.test("desktopPolicy: maxListeners exhausts after that many addListener chec
 
 // -- whole-stream, through createDriver + linkedom --------------------------
 //
-// Reuses the frame-encoder pattern from policy_test.ts / driver_test.ts:
-// a `Writer`-backed length-delimited `Frame` builder, rather than a new
-// encoder.
+// Reuses the frame-builder pattern from policy_test.ts / driver_test.ts:
+// the generated `Frame` writer plus the shared length prefix in wire.ts.
 
-const FRAME_SET_ATTRIBUTE = 4;
-const FRAME_CREATE_ELEMENT = 6;
-const FRAME_INSERT_BEFORE = 2;
-const FRAME_ADD_LISTENER = 12;
-const FRAME_INTERN = 14;
-const FRAME_COMMIT = 1;
-
-const INTERN_ID = 1;
-const INTERN_S = 2;
-const CREATE_ELEMENT_ID = 1;
-const CREATE_ELEMENT_TAG = 2;
-const INSERT_BEFORE_PARENT = 1;
-const INSERT_BEFORE_ID = 2;
-const SET_ATTRIBUTE_ID = 1;
-const SET_ATTRIBUTE_NAME = 2;
-const SET_ATTRIBUTE_TEXT = 4;
-const LISTENER_ID = 1;
-const LISTENER_NAME = 2;
-const LISTENER_BUBBLES = 3;
-const ADD_LISTENER_LISTENER = 1;
-
-function frame(commit: boolean, build?: (w: Writer) => void): Uint8Array {
-  const inner = new Writer();
-  if (commit) inner.writeBool(FRAME_COMMIT, true);
-  build?.(inner);
-  const body = inner.finish();
-  const lenW = new Writer();
-  lenW.writeVarint32(body.length);
-  const lenBytes = lenW.finish();
-  const out = new Uint8Array(lenBytes.length + body.length);
-  out.set(lenBytes, 0);
-  out.set(body, lenBytes.length);
-  return out;
-}
-
-function concat(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
+function frame(commit: boolean, op?: Frame["op"]): Uint8Array {
+  return framed(Frame.encode({ commit, op }).finish());
 }
 
 function internFrame(id: number, s: string): Uint8Array {
-  return frame(false, (w) => {
-    w.writeMessage(FRAME_INTERN, (m) => {
-      m.writeUint32(INTERN_ID, id);
-      m.writeString(INTERN_S, s);
-    });
-  });
+  return frame(false, { $case: "intern", value: { id, s } });
 }
 
 function createElementFrame(id: number, tagRef: number): Uint8Array {
-  return frame(false, (w) => {
-    w.writeMessage(FRAME_CREATE_ELEMENT, (m) => {
-      m.writeUint32(CREATE_ELEMENT_ID, id);
-      m.writeUint32(CREATE_ELEMENT_TAG, tagRef);
-    });
+  return frame(false, {
+    $case: "createElement",
+    value: { id, tag: tagRef, ns: undefined },
   });
 }
 
 function insertBeforeFrame(parent: number, id: number): Uint8Array {
-  return frame(false, (w) => {
-    w.writeMessage(FRAME_INSERT_BEFORE, (m) => {
-      m.writeUint32(INSERT_BEFORE_PARENT, parent);
-      m.writeUint32(INSERT_BEFORE_ID, id);
-    });
+  return frame(false, {
+    $case: "insertBefore",
+    value: { parent, id, anchor: undefined },
   });
 }
 
@@ -831,24 +780,31 @@ function setAttributeTextFrame(
   nameRef: number,
   text: string,
 ): Uint8Array {
-  return frame(false, (w) => {
-    w.writeMessage(FRAME_SET_ATTRIBUTE, (m) => {
-      m.writeUint32(SET_ATTRIBUTE_ID, id);
-      m.writeUint32(SET_ATTRIBUTE_NAME, nameRef);
-      m.writeString(SET_ATTRIBUTE_TEXT, text);
-    });
+  return frame(false, {
+    $case: "setAttribute",
+    value: {
+      id,
+      name: nameRef,
+      ns: undefined,
+      value: { $case: "text", value: text },
+    },
   });
 }
 
 function addListenerFrame(id: number, nameRef: number): Uint8Array {
-  return frame(true, (w) => {
-    w.writeMessage(FRAME_ADD_LISTENER, (m) => {
-      m.writeMessage(ADD_LISTENER_LISTENER, (l) => {
-        l.writeUint32(LISTENER_ID, id);
-        l.writeUint32(LISTENER_NAME, nameRef);
-        l.writeBool(LISTENER_BUBBLES, true);
-      });
-    });
+  return frame(true, {
+    $case: "addListener",
+    value: {
+      listener: {
+        target: { $case: "id", value: id },
+        name: nameRef,
+        bubbles: true,
+        capture: false,
+        passive: false,
+        preventDefault: false,
+        stopPropagation: false,
+      },
+    },
   });
 }
 
@@ -871,7 +827,7 @@ Deno.test("desktopPolicy: a div > form > input + button stream with a submit lis
     handleEvent: () => {},
   });
 
-  driver.push(concat([
+  driver.push(stream(
     internFrame(DIV, "div"),
     internFrame(FORM, "form"),
     internFrame(INPUT, "input"),
@@ -886,7 +842,7 @@ Deno.test("desktopPolicy: a div > form > input + button stream with a submit lis
     createElementFrame(13, BUTTON),
     insertBeforeFrame(11, 13),
     addListenerFrame(11, SUBMIT),
-  ]));
+  ));
 
   assertEquals(
     root.innerHTML,
@@ -904,13 +860,13 @@ Deno.test("desktopPolicy: an <a href> with a javascript: text value is rejected 
 
   assertThrows(
     () =>
-      driver.push(concat([
+      driver.push(stream(
         internFrame(A, "a"),
         internFrame(HREF, "href"),
         createElementFrame(20, A),
         insertBeforeFrame(0, 20),
         setAttributeTextFrame(20, HREF, "javascript:alert(1)"),
-      ])),
+      )),
     PolicyError,
     "asset handle",
   );
