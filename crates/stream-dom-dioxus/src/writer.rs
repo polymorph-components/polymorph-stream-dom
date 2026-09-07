@@ -379,10 +379,14 @@ impl MutationWriter {
                     {
                         let name = self.intern(name);
                         let ns = self.intern_opt(*namespace);
+                        let value = match asset_handle(value) {
+                            Some(h) => proto::template_attr::Value::Asset(h),
+                            None => proto::template_attr::Value::Text((*value).to_string()),
+                        };
                         out_attrs.push(proto::TemplateAttr {
                             name,
                             ns,
-                            value: Some(proto::template_attr::Value::Text((*value).to_string())),
+                            value: Some(value),
                         });
                     }
                 }
@@ -558,6 +562,15 @@ impl WriteMutations for MutationWriter {
             return;
         };
 
+        // An asset handle is never a property, never a style: check before
+        // either branch below.
+        if let Some(h) = text.as_deref().and_then(asset_handle) {
+            let name = self.intern(name);
+            let ns = self.intern_opt(ns);
+            self.batch.set_attribute_asset(nid, name, ns, &h);
+            return;
+        }
+
         if ns == Some("style") {
             // The protocol carries one `style` attribute, not a style map, so
             // Dioxus's per-property writes accumulate and re-serialize whole.
@@ -676,6 +689,32 @@ impl WriteMutations for MutationWriter {
         let nid = self.node(id);
         self.stack.push(nid);
     }
+}
+
+/// The Dioxus producer's spelling for an asset handle (docs/design.md
+/// "Assets are handles, not bytes and not URLs"). Dioxus attribute values are
+/// strings; the protocol's `asset` arm wants opaque bytes, so a Dioxus app
+/// names a handle as `asset:<hex>` and this decodes it back. Anything not
+/// matching the grammar — including a bare `"asset:"` prefix — is left as
+/// text, unchanged.
+///
+/// Returns `None` unless `value` is `asset:` followed by a non-empty,
+/// even-length run of hex digits (either case).
+fn asset_handle(value: &str) -> Option<Vec<u8>> {
+    let hex = value.strip_prefix("asset:")?;
+    if hex.is_empty() || hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let digits = hex.as_bytes();
+    let mut i = 0;
+    while i < digits.len() {
+        let hi = (digits[i] as char).to_digit(16)?;
+        let lo = (digits[i + 1] as char).to_digit(16)?;
+        bytes.push((hi as u8) << 4 | lo as u8);
+        i += 2;
+    }
+    Some(bytes)
 }
 
 /// Reduce an `AttributeValue` to the string dioxus's own renderer hands its
