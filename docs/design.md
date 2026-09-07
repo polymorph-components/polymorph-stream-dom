@@ -513,6 +513,13 @@ wire rule.
 clone. A receiver with no `resolveAsset` configured treats an asset value
 as an error.
 
+Dioxus attribute values are always strings, with no `asset` arm of their
+own to write into — so `stream-dom-dioxus` spells a handle as the string
+`asset:<hex>` (an even-length run of hex digits) and decodes it back to
+the `asset` arm at both the static-template and dynamic `set-attribute`
+sites. Anything not matching that grammar, including a value that merely
+resembles the prefix, is text, exactly as before.
+
 ## Events
 
 Dispatch: `handle-event(target, name, payload: list<u8>, ev)` export.

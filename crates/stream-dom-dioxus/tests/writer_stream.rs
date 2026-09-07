@@ -542,6 +542,89 @@ fn attribute_property_table_matches_dioxus_web() {
     }
 }
 
+/// A static template attribute matching the `asset:<hex>` convention, plus
+/// four dynamic attributes exercising the boundary: a real handle and three
+/// values that merely resemble the prefix (bare, non-hex, odd-length).
+fn asset_app() -> Element {
+    let a = use_signal(|| "asset:deadbeef".to_string());
+    let b = use_signal(|| "asset:".to_string());
+    let c = use_signal(|| "asset:xyz".to_string());
+    let d = use_signal(|| "asset:abc".to_string());
+    rsx! {
+        link { rel: "stylesheet", href: "asset:0a0B" }
+        input { "data-a": "{a}" }
+        input { "data-b": "{b}" }
+        input { "data-c": "{c}" }
+        input { "data-d": "{d}" }
+    }
+}
+
+/// Both the static-template and dynamic `set_attribute` paths recognize the
+/// `asset:<hex>` convention (writer.rs `asset_handle`; docs/design.md
+/// "Assets are handles, not bytes and not URLs") and only that grammar: a
+/// bare prefix, non-hex digits, or an odd-length hex run all stay `Text`.
+#[test]
+fn asset_convention_marks_the_asset_arm_and_only_the_asset_arm() {
+    let interner = Rc::new(RefCell::new(Interner::new()));
+    let mut writer = MutationWriter::new(interner.clone());
+    let mut dom = VirtualDom::new(asset_app);
+    dom.rebuild(&mut writer);
+    let bytes = writer.batch.finish().expect("mount produces a batch");
+    let frames = decode_all(&bytes);
+
+    let mut template_href = None;
+    for f in &frames {
+        if let Some(proto::frame::Op::RegisterTemplate(t)) = &f.op {
+            for node in &t.nodes {
+                if let Some(proto::template_node::Kind::Element(e)) = &node.kind {
+                    for a in &e.attrs {
+                        if interner.borrow().resolve(a.name) == Some("href") {
+                            template_href = a.value.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        template_href,
+        Some(proto::template_attr::Value::Asset(vec![0x0a, 0x0b])),
+        "static href=\"asset:0a0B\" must decode to Value::Asset([0x0a, 0x0b])"
+    );
+
+    // Dynamic `data-*` attrs, keyed by name so each signal's fate is checked
+    // independently of frame order.
+    let mut dynamic: std::collections::HashMap<String, Option<proto::set_attribute::Value>> =
+        std::collections::HashMap::new();
+    for f in &frames {
+        if let Some(proto::frame::Op::SetAttribute(s)) = &f.op {
+            if let Some(name) = interner.borrow().resolve(s.name) {
+                if name.starts_with("data-") {
+                    dynamic.insert(name.to_string(), s.value.clone());
+                }
+            }
+        }
+    }
+    assert_eq!(
+        dynamic.get("data-a"),
+        Some(&Some(proto::set_attribute::Value::Asset(vec![
+            0xde, 0xad, 0xbe, 0xef
+        ]))),
+        "data-a=\"asset:deadbeef\" must decode to Value::Asset; got {dynamic:?}"
+    );
+    for (name, text) in [
+        ("data-b", "asset:"),
+        ("data-c", "asset:xyz"),
+        ("data-d", "asset:abc"),
+    ] {
+        assert_eq!(
+            dynamic.get(name),
+            Some(&Some(proto::set_attribute::Value::Text(text.to_string()))),
+            "{name}={text:?} does not match the asset grammar and must stay Text; got {dynamic:?}"
+        );
+    }
+}
+
 /// Each row's `button` is a template interior with its own node id, so
 /// removing a row must forget the button too.
 fn removable_list() -> Element {
