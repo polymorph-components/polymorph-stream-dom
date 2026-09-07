@@ -11,7 +11,8 @@ import type { ProducerEventTarget } from "../src/driver.ts";
 import { PROTOCOL_VERSION } from "../src/frames.ts";
 import { PolicyError } from "../src/policy.ts";
 import type { Policy } from "../src/policy.ts";
-import { Writer } from "../src/proto.ts";
+import { Frame } from "../src/gen/stream-dom.ts";
+import { frame as framed, stream } from "./wire.ts";
 
 /** A policy that allows every op — the baseline these tests vary from. */
 function allowAll(extra?: Partial<Policy>): Policy {
@@ -71,58 +72,10 @@ async function pushAndAwaitCommit(
   await p;
 }
 
-// Frame field numbers, transcribed from proto/stream-dom.proto (see
-// policy_test.ts's header comment for why these are independent literals
-// rather than imports from src/).
-const FRAME_COMMIT = 1;
-const FRAME_INSERT_BEFORE = 2;
-const FRAME_SET_TEXT = 3;
-const FRAME_CREATE_ELEMENT = 6;
-const FRAME_CREATE_TEXT = 7;
-const FRAME_ADD_LISTENER = 12;
-const FRAME_INTERN = 14;
-
-const INTERN_ID = 1;
-const INTERN_S = 2;
-const CREATE_ELEMENT_ID = 1;
-const CREATE_ELEMENT_TAG = 2;
-const CREATE_TEXT_ID = 1;
-const CREATE_TEXT_TEXT = 2;
-const INSERT_BEFORE_PARENT = 1;
-const INSERT_BEFORE_ID = 2;
-const SET_TEXT_ID = 1;
-const SET_TEXT_TEXT = 2;
-const LISTENER_ID = 1;
-const LISTENER_NAME = 2;
-const LISTENER_BUBBLES = 3;
-const LISTENER_PREVENT_DEFAULT = 6;
-const ADD_LISTENER_LISTENER = 1;
-
-/** One length-delimited `Frame` message. `build` writes the op field(s);
- * `commit` sets `Frame.commit`. */
-function frame(commit: boolean, build?: (w: Writer) => void): Uint8Array {
-  const inner = new Writer();
-  if (commit) inner.writeBool(FRAME_COMMIT, true);
-  build?.(inner);
-  const body = inner.finish();
-  const framed = new Writer();
-  framed.writeVarint32(body.length);
-  const lenBytes = framed.finish();
-  const out = new Uint8Array(lenBytes.length + body.length);
-  out.set(lenBytes, 0);
-  out.set(body, lenBytes.length);
-  return out;
-}
-
-function concat(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
+/** One length-delimited `Frame` message, built with the generated
+ * writer; `commit` sets `Frame.commit`. */
+function frame(commit: boolean, op?: Frame["op"]): Uint8Array {
+  return framed(Frame.encode({ commit, op }).finish());
 }
 
 const DIV = 1, CLICK = 2;
@@ -131,48 +84,22 @@ const DIV = 1, CLICK = 2;
  * "hi"), insert(10, 11), set-text(11, "hi there"), commit. */
 function basicFrames(): Uint8Array[] {
   return [
-    frame(false, (w) => {
-      w.writeMessage(FRAME_INTERN, (m) => {
-        m.writeUint32(INTERN_ID, DIV);
-        m.writeString(INTERN_S, "div");
-      });
+    frame(false, { $case: "intern", value: { id: DIV, s: "div" } }),
+    frame(false, { $case: "intern", value: { id: CLICK, s: "click" } }),
+    frame(false, {
+      $case: "createElement",
+      value: { id: 10, tag: DIV, ns: undefined },
     }),
-    frame(false, (w) => {
-      w.writeMessage(FRAME_INTERN, (m) => {
-        m.writeUint32(INTERN_ID, CLICK);
-        m.writeString(INTERN_S, "click");
-      });
+    frame(false, {
+      $case: "insertBefore",
+      value: { parent: 0, id: 10, anchor: undefined },
     }),
-    frame(false, (w) => {
-      w.writeMessage(FRAME_CREATE_ELEMENT, (m) => {
-        m.writeUint32(CREATE_ELEMENT_ID, 10);
-        m.writeUint32(CREATE_ELEMENT_TAG, DIV);
-      });
+    frame(false, { $case: "createText", value: { id: 11, text: "hi" } }),
+    frame(false, {
+      $case: "insertBefore",
+      value: { parent: 10, id: 11, anchor: undefined },
     }),
-    frame(false, (w) => {
-      w.writeMessage(FRAME_INSERT_BEFORE, (m) => {
-        m.writeUint32(INSERT_BEFORE_PARENT, 0);
-        m.writeUint32(INSERT_BEFORE_ID, 10);
-      });
-    }),
-    frame(false, (w) => {
-      w.writeMessage(FRAME_CREATE_TEXT, (m) => {
-        m.writeUint32(CREATE_TEXT_ID, 11);
-        m.writeString(CREATE_TEXT_TEXT, "hi");
-      });
-    }),
-    frame(false, (w) => {
-      w.writeMessage(FRAME_INSERT_BEFORE, (m) => {
-        m.writeUint32(INSERT_BEFORE_PARENT, 10);
-        m.writeUint32(INSERT_BEFORE_ID, 11);
-      });
-    }),
-    frame(true, (w) => {
-      w.writeMessage(FRAME_SET_TEXT, (m) => {
-        m.writeUint32(SET_TEXT_ID, 11);
-        m.writeString(SET_TEXT_TEXT, "hi there");
-      });
-    }),
+    frame(true, { $case: "setText", value: { id: 11, text: "hi there" } }),
   ];
 }
 
@@ -180,15 +107,19 @@ function basicFrames(): Uint8Array[] {
 function addClickListenerFrame(
   opts?: { preventDefault?: boolean },
 ): Uint8Array {
-  return frame(true, (w) => {
-    w.writeMessage(FRAME_ADD_LISTENER, (m) => {
-      m.writeMessage(ADD_LISTENER_LISTENER, (l) => {
-        l.writeUint32(LISTENER_ID, 10);
-        l.writeUint32(LISTENER_NAME, CLICK);
-        l.writeBool(LISTENER_BUBBLES, true);
-        if (opts?.preventDefault) l.writeBool(LISTENER_PREVENT_DEFAULT, true);
-      });
-    });
+  return frame(true, {
+    $case: "addListener",
+    value: {
+      listener: {
+        target: { $case: "id", value: 10 },
+        name: CLICK,
+        bubbles: true,
+        capture: false,
+        passive: false,
+        preventDefault: opts?.preventDefault === true,
+        stopPropagation: false,
+      },
+    },
   });
 }
 
@@ -204,7 +135,7 @@ Deno.test("Driver: bytes in, DOM out, split mid-frame, no component", async () =
     },
   });
 
-  const all = concat(basicFrames());
+  const all = stream(...basicFrames());
   // Split mid-frame: partway through the fixed-point of the sequence,
   // well inside a frame's body rather than on a frame boundary.
   const mid = Math.floor(all.length / 2);
@@ -235,7 +166,7 @@ Deno.test("Driver: a bubbling click listener fires handleEvent with the right ta
       calls.push([target, nameRef, payload]);
     },
   });
-  await pushAndAwaitCommit(driver, concat(basicFrames()));
+  await pushAndAwaitCommit(driver, stream(...basicFrames()));
   await pushAndAwaitCommit(driver, addClickListenerFrame());
 
   const div = root.querySelector("div")!;
@@ -263,7 +194,7 @@ Deno.test("Driver: prevent_default is honored even though handleEvent does nothi
     root,
     handleEvent: () => {}, // does nothing — flag must still land
   });
-  await pushAndAwaitCommit(driver, concat(basicFrames()));
+  await pushAndAwaitCommit(driver, stream(...basicFrames()));
   await pushAndAwaitCommit(
     driver,
     addClickListenerFrame({ preventDefault: true }),
@@ -292,7 +223,7 @@ Deno.test("Driver: policy.query gates individual queries; absent means allow", a
     policy: allowAll({ query: (name) => name !== "set-focus" }),
     handleEvent: () => {},
   });
-  await pushAndAwaitCommit(gated, concat(basicFrames()));
+  await pushAndAwaitCommit(gated, stream(...basicFrames()));
   assertEquals(gated.queries.setFocus(10, true), false);
   // ...while a query the same policy does not refuse still answers.
   assertEquals(gated.queries.getClientRect(10), {
@@ -307,7 +238,7 @@ Deno.test("Driver: policy.query gates individual queries; absent means allow", a
     policy: allowAll(),
     handleEvent: () => {},
   });
-  await pushAndAwaitCommit(open, concat(basicFrames()));
+  await pushAndAwaitCommit(open, stream(...basicFrames()));
   assertEquals(open.queries.setFocus(10, true), true);
   assertEquals(open.queries.getClientRect(10), {
     origin: { x: 0, y: 0 },
@@ -328,7 +259,7 @@ Deno.test("Driver: a policy rejection throws PolicyError out of push", () => {
   });
   const driver = createDriver({ root, policy, handleEvent: () => {} });
   assertThrows(
-    () => driver.push(concat(basicFrames())),
+    () => driver.push(stream(...basicFrames())),
     PolicyError,
     "div is not in the host vocabulary",
   );
@@ -352,11 +283,9 @@ Deno.test("Driver: a policy pinning another protocol version is refused at const
 Deno.test("Driver: an unknown node id throws", () => {
   const { win, root } = fixture();
   const driver = createDriver({ root, handleEvent: () => {} });
-  const bad = frame(true, (w) => {
-    w.writeMessage(FRAME_SET_TEXT, (m) => {
-      m.writeUint32(SET_TEXT_ID, 999);
-      m.writeString(SET_TEXT_TEXT, "x");
-    });
+  const bad = frame(true, {
+    $case: "setText",
+    value: { id: 999, text: "x" },
   });
   assertThrows(() => driver.push(bad), Error, "unknown node id 999");
   withGlobalWindow(win, () => driver.dispose());
@@ -376,7 +305,7 @@ Deno.test("Driver: defaultPreventDefault prevents a submit with NO producer list
       defaultPreventDefault: on,
       handleEvent: () => {},
     });
-    await pushAndAwaitCommit(driver, concat(basicFrames()));
+    await pushAndAwaitCommit(driver, stream(...basicFrames()));
 
     const div = root.querySelector("div")!;
     const ev = new (win as unknown as { Event: typeof Event }).Event(
@@ -420,26 +349,17 @@ async function fixtureWithLeaf(
   });
   await pushAndAwaitCommit(
     driver,
-    concat([
-      frame(false, (w) => {
-        w.writeMessage(FRAME_INTERN, (m) => {
-          m.writeUint32(INTERN_ID, DIV);
-          m.writeString(INTERN_S, tag);
-        });
+    stream(
+      frame(false, { $case: "intern", value: { id: DIV, s: tag } }),
+      frame(false, {
+        $case: "createElement",
+        value: { id: 10, tag: DIV, ns: undefined },
       }),
-      frame(false, (w) => {
-        w.writeMessage(FRAME_CREATE_ELEMENT, (m) => {
-          m.writeUint32(CREATE_ELEMENT_ID, 10);
-          m.writeUint32(CREATE_ELEMENT_TAG, DIV);
-        });
+      frame(true, {
+        $case: "insertBefore",
+        value: { parent: 0, id: 10, anchor: undefined },
       }),
-      frame(true, (w) => {
-        w.writeMessage(FRAME_INSERT_BEFORE, (m) => {
-          m.writeUint32(INSERT_BEFORE_PARENT, 0);
-          m.writeUint32(INSERT_BEFORE_ID, 10);
-        });
-      }),
-    ]),
+    ),
   );
   if (href !== undefined) {
     root.querySelector(tag)!.setAttribute("href", href);
@@ -489,26 +409,17 @@ Deno.test("Driver: defaultPreventDefault off means nothing is prevented, even a 
   });
   await pushAndAwaitCommit(
     driver,
-    concat([
-      frame(false, (w) => {
-        w.writeMessage(FRAME_INTERN, (m) => {
-          m.writeUint32(INTERN_ID, DIV);
-          m.writeString(INTERN_S, "a");
-        });
+    stream(
+      frame(false, { $case: "intern", value: { id: DIV, s: "a" } }),
+      frame(false, {
+        $case: "createElement",
+        value: { id: 10, tag: DIV, ns: undefined },
       }),
-      frame(false, (w) => {
-        w.writeMessage(FRAME_CREATE_ELEMENT, (m) => {
-          m.writeUint32(CREATE_ELEMENT_ID, 10);
-          m.writeUint32(CREATE_ELEMENT_TAG, DIV);
-        });
+      frame(true, {
+        $case: "insertBefore",
+        value: { parent: 0, id: 10, anchor: undefined },
       }),
-      frame(true, (w) => {
-        w.writeMessage(FRAME_INSERT_BEFORE, (m) => {
-          m.writeUint32(INSERT_BEFORE_PARENT, 0);
-          m.writeUint32(INSERT_BEFORE_ID, 10);
-        });
-      }),
-    ]),
+    ),
   );
   root.querySelector("a")!.setAttribute("href", "http://x");
   const ev = new (win as unknown as { Event: typeof Event }).Event("click", {
@@ -529,7 +440,7 @@ Deno.test("Driver: after dispose, root listeners are gone (dispatch no longer ca
       calls.push(a);
     },
   });
-  await pushAndAwaitCommit(driver, concat(basicFrames()));
+  await pushAndAwaitCommit(driver, stream(...basicFrames()));
   await pushAndAwaitCommit(driver, addClickListenerFrame());
 
   withGlobalWindow(win, () => driver.dispose());
@@ -544,5 +455,5 @@ Deno.test("Driver: after dispose, root listeners are gone (dispatch no longer ca
   assertEquals(calls.length, 0);
 
   // push is a no-op after dispose (Driver.push's documented contract).
-  driver.push(concat(basicFrames()));
+  driver.push(stream(...basicFrames()));
 });

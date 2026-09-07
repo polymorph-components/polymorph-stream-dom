@@ -1,11 +1,24 @@
-// Frame decoder: `proto/stream-dom.proto`'s `Frame` message, decoded
-// field-by-field with a switch on tag straight into `FrameSink` calls — the
-// "pbf hybrid decode" docs/design.md's Encoding section describes, with no
-// intermediate object for the hot structural ops. Field numbers below are
-// copied from the .proto (which is normative and not owned by this
-// track); each constant is named after its proto message and field.
+// Frame decoder: `proto/stream-dom.proto`'s `Frame` message, decoded by the
+// ts-proto generated reader in `src/gen/stream-dom.ts` over
+// `@bufbuild/protobuf/wire`'s `BinaryReader`, then adapted to `FrameSink`'s
+// calls at the dispatch site below. No hand-written wire code — docs/design.md
+// "Encoding: protobuf, and why not a hand-rolled layout" records the
+// measurement that chose generated readers over the hand-rolled decoder this
+// replaces.
 
-import { Reader, TruncatedError, WireType } from "./proto.ts";
+import { BinaryReader } from "@bufbuild/protobuf/wire";
+import {
+  type AddListener,
+  Frame,
+  Global,
+  type Listener as WireListener,
+  type RegisterTemplate,
+  type RemoveListener,
+  type SetAttribute,
+  type TemplateAttr as WireTemplateAttr,
+  type TemplateElement as WireTemplateElement,
+  type TemplateNode as WireTemplateNode,
+} from "./gen/stream-dom.ts";
 
 /** The wire protocol version this receiver implements — the number on
  * proto/stream-dom.proto's `// PROTOCOL VERSION: 1` header line, which is
@@ -16,119 +29,17 @@ export const PROTOCOL_VERSION = 1;
 /** Strict-mode rejection of wire content this receiver does not know: an
  * open receiver skips it, a receiver enforcing a policy must not
  * (proto/stream-dom.proto header, docs/design.md "Policy"). Off the hot
- * path — the skip branches test one boolean and call this only to throw. */
+ * path — the strict walk runs only when strict mode is on. */
 function unknownField(field: number, message: string): never {
   throw new Error(
     `stream-dom: unknown field ${field} in ${message} (receiver PROTOCOL_VERSION ${PROTOCOL_VERSION})`,
   );
 }
 
-// -- Frame --------------------------------------------------------------
-
-const FRAME_COMMIT = 1;
-const FRAME_INSERT_BEFORE = 2;
-const FRAME_SET_TEXT = 3;
-const FRAME_SET_ATTRIBUTE = 4;
-const FRAME_SET_PROPERTY = 5;
-const FRAME_CREATE_ELEMENT = 6;
-const FRAME_CREATE_TEXT = 7;
-const FRAME_REMOVE = 8;
-const FRAME_CLONE_TEMPLATE = 9;
-const FRAME_BIND_PATH = 10;
-const FRAME_CREATE_PLACEHOLDER = 11;
-const FRAME_ADD_LISTENER = 12;
-const FRAME_REMOVE_LISTENER = 13;
-const FRAME_INTERN = 14;
-const FRAME_REGISTER_TEMPLATE = 15;
-const FRAME_INSERT_AFTER = 16;
-const FRAME_BIND_MARKER = 17;
-/** Lowest oneof `op` field number — used to recognize "some op field was
- * present, even one this decoder does not know" for the no-op/no-commit
- * check below. */
+/** Lowest oneof `op` field number in `Frame` — an unknown field at or above
+ * it is an op case from a future schema version, so it counts as "some op
+ * field was present" for the no-op/no-commit check below. */
 const FRAME_OP_FIELD_MIN = 2;
-
-const INTERN_ID = 1;
-const INTERN_S = 2;
-
-const CREATE_ELEMENT_ID = 1;
-const CREATE_ELEMENT_TAG = 2;
-const CREATE_ELEMENT_NS = 3;
-
-const CREATE_TEXT_ID = 1;
-const CREATE_TEXT_TEXT = 2;
-
-const CREATE_PLACEHOLDER_ID = 1;
-
-const INSERT_BEFORE_PARENT = 1;
-const INSERT_BEFORE_ID = 2;
-const INSERT_BEFORE_ANCHOR = 3;
-
-const INSERT_AFTER_PARENT = 1;
-const INSERT_AFTER_ID = 2;
-const INSERT_AFTER_ANCHOR = 3;
-
-const REMOVE_ID = 1;
-
-const SET_TEXT_ID = 1;
-const SET_TEXT_TEXT = 2;
-
-const SET_ATTRIBUTE_ID = 1;
-const SET_ATTRIBUTE_NAME = 2;
-const SET_ATTRIBUTE_NS = 3;
-const SET_ATTRIBUTE_TEXT = 4;
-const SET_ATTRIBUTE_ASSET = 5;
-
-const SET_PROPERTY_ID = 1;
-const SET_PROPERTY_NAME = 2;
-const SET_PROPERTY_TEXT = 3;
-const SET_PROPERTY_INT = 4;
-const SET_PROPERTY_FLOAT = 5;
-const SET_PROPERTY_BOOLEAN = 6;
-
-const LISTENER_ID = 1;
-const LISTENER_NAME = 2;
-const LISTENER_BUBBLES = 3;
-const LISTENER_CAPTURE = 4;
-const LISTENER_PASSIVE = 5;
-const LISTENER_PREVENT_DEFAULT = 6;
-const LISTENER_STOP_PROPAGATION = 7;
-const LISTENER_GLOBAL = 8;
-
-/** `Global` enum values (proto/stream-dom.proto). */
-const GLOBAL_WINDOW = 0;
-const GLOBAL_DOCUMENT = 1;
-
-const ADD_LISTENER_LISTENER = 1;
-const REMOVE_LISTENER_LISTENER = 1;
-
-const TEMPLATE_ATTR_NAME = 1;
-const TEMPLATE_ATTR_NS = 2;
-const TEMPLATE_ATTR_TEXT = 3;
-const TEMPLATE_ATTR_ASSET = 4;
-
-const TEMPLATE_ELEMENT_TAG = 1;
-const TEMPLATE_ELEMENT_NS = 2;
-const TEMPLATE_ELEMENT_ATTRS = 3;
-const TEMPLATE_ELEMENT_CHILDREN = 4;
-
-const TEMPLATE_NODE_ELEMENT = 1;
-const TEMPLATE_NODE_TEXT = 2;
-const TEMPLATE_NODE_DYNAMIC = 3;
-
-const REGISTER_TEMPLATE_ID = 1;
-const REGISTER_TEMPLATE_NODES = 2;
-const REGISTER_TEMPLATE_ROOTS = 3;
-
-const CLONE_TEMPLATE_TMPL = 1;
-const CLONE_TEMPLATE_ROOT = 2;
-const CLONE_TEMPLATE_ID = 3;
-
-const BIND_PATH_ROOT = 1;
-const BIND_PATH_PATH = 2;
-const BIND_PATH_ID = 3;
-
-const BIND_MARKER_KEY = 1;
-const BIND_MARKER_ID = 2;
 
 // -- decoded shapes -------------------------------------------------------
 
@@ -226,180 +137,205 @@ export interface FrameSink {
   commit(): void;
 }
 
-function decodeListener(r: Reader, strict: boolean): Listener {
-  let target: ListenerTarget | undefined;
-  let name = 0;
-  let bubbles = false;
-  let capture = false;
-  let passive = false;
-  let preventDefault = false;
-  let stopPropagation = false;
-  while (!r.finished()) {
-    const [field, wireType] = r.readTag();
-    switch (field) {
-      case LISTENER_ID:
-        target = { kind: "node", id: r.readVarint32() };
-        break;
-      case LISTENER_GLOBAL: {
-        const g = r.readVarint32();
-        if (g === GLOBAL_WINDOW) target = { kind: "window" };
-        else if (g === GLOBAL_DOCUMENT) target = { kind: "document" };
-        else throw new Error(`stream-dom: Listener.global unknown value ${g}`);
-        break;
-      }
-      case LISTENER_NAME:
-        name = r.readVarint32();
-        break;
-      case LISTENER_BUBBLES:
-        bubbles = r.readBool();
-        break;
-      case LISTENER_CAPTURE:
-        capture = r.readBool();
-        break;
-      case LISTENER_PASSIVE:
-        passive = r.readBool();
-        break;
-      case LISTENER_PREVENT_DEFAULT:
-        preventDefault = r.readBool();
-        break;
-      case LISTENER_STOP_PROPAGATION:
-        stopPropagation = r.readBool();
-        break;
-      default:
-        if (strict) unknownField(field, "Listener");
-        r.skip(wireType);
-    }
-  }
-  // Proto3 `oneof` has no default case: neither field set is a genuine
-  // absence, not "id 0" (which IS the mount root and a legal target).
-  if (!target) {
+// -- generated message -> FrameSink shapes --------------------------------
+
+/** `SetAttribute.value` / `TemplateAttr.value`. `BinaryReader.bytes()`
+ * returns a VIEW over the decode buffer, while this decoder's buffer is
+ * reused across `push` calls (and, under the direct transport, aliases
+ * guest memory that is invalid once the read callback returns), so an
+ * asset handle retained past this call must own its bytes: `.slice()`. */
+function attrValue(m: SetAttribute | WireTemplateAttr): AttrValue | undefined {
+  const v = m.value;
+  if (v === undefined) return undefined;
+  if (v.$case === "text") return { kind: "text", value: v.value };
+  return { kind: "asset", handle: v.value.slice() };
+}
+
+function listener(m: WireListener): Listener {
+  const t = m.target;
+  let target: ListenerTarget;
+  if (t === undefined) {
+    // Proto3 `oneof` has no default case: neither field set is a genuine
+    // absence, not "id 0" (which IS the mount root and a legal target).
     throw new Error(
       "stream-dom: Listener has no target (neither id nor global set)",
     );
+  } else if (t.$case === "id") {
+    target = { kind: "node", id: t.value };
+  } else if (t.value === Global.WINDOW) {
+    target = { kind: "window" };
+  } else if (t.value === Global.DOCUMENT) {
+    target = { kind: "document" };
+  } else {
+    throw new Error(`stream-dom: Listener.global unknown value ${t.value}`);
   }
   return {
     target,
-    name,
-    bubbles,
-    capture,
-    passive,
-    preventDefault,
-    stopPropagation,
+    name: m.name,
+    bubbles: m.bubbles,
+    capture: m.capture,
+    passive: m.passive,
+    preventDefault: m.preventDefault,
+    stopPropagation: m.stopPropagation,
   };
 }
 
-/** A `repeated uint32` field: proto3 packs scalar-numeric repeated fields
- * by default (length-delimited, consecutive varints with no per-element
- * tag), but an unpacked encoder emitting one tag/varint pair per element
- * is equally valid wire; both are accepted here. */
-function readPackedOrRepeatedUint32(
-  r: Reader,
-  wireType: WireType,
-  into: number[],
-): void {
-  if (wireType === WireType.LengthDelimited) {
-    const sub = r.readMessage();
-    while (!sub.finished()) into.push(sub.readVarint32());
-  } else {
-    into.push(r.readVarint32());
+function templateAttrs(ms: WireTemplateAttr[]): TemplateAttr[] {
+  const out: TemplateAttr[] = [];
+  for (const a of ms) {
+    // No `value` case set keeps the proto3 default, an empty text value.
+    out.push({
+      name: a.name,
+      ns: a.ns,
+      value: attrValue(a) ?? { kind: "text", value: "" },
+    });
   }
+  return out;
 }
 
-function decodeTemplateAttr(r: Reader, strict: boolean): TemplateAttr {
-  const a: TemplateAttr = {
-    name: 0,
-    ns: undefined,
-    value: { kind: "text", value: "" },
+function templateElement(e: WireTemplateElement): TemplateElement {
+  return {
+    tag: e.tag,
+    ns: e.ns,
+    attrs: templateAttrs(e.attrs),
+    children: e.children,
   };
-  while (!r.finished()) {
-    const [field, wireType] = r.readTag();
-    switch (field) {
-      case TEMPLATE_ATTR_NAME:
-        a.name = r.readVarint32();
-        break;
-      case TEMPLATE_ATTR_NS:
-        a.ns = r.readVarint32();
-        break;
-      case TEMPLATE_ATTR_TEXT:
-        a.value = { kind: "text", value: r.readString() };
-        break;
-      case TEMPLATE_ATTR_ASSET:
-        // `readBytes` COPIES (proto.ts) rather than returning a view over
-        // the decode buffer: under the direct transport those bytes alias
-        // guest memory and are invalid once the read callback returns, so
-        // a handle retained past this call must own them.
-        a.value = { kind: "asset", handle: r.readBytes() };
-        break;
-      default:
-        if (strict) unknownField(field, "TemplateAttr");
-        r.skip(wireType);
-    }
-  }
-  return a;
 }
 
-function decodeTemplateElement(r: Reader, strict: boolean): TemplateElement {
-  const e: TemplateElement = { tag: 0, ns: undefined, attrs: [], children: [] };
-  while (!r.finished()) {
-    const [field, wireType] = r.readTag();
-    switch (field) {
-      case TEMPLATE_ELEMENT_TAG:
-        e.tag = r.readVarint32();
-        break;
-      case TEMPLATE_ELEMENT_NS:
-        e.ns = r.readVarint32();
-        break;
-      case TEMPLATE_ELEMENT_ATTRS:
-        e.attrs.push(decodeTemplateAttr(r.readMessage(), strict));
-        break;
-      case TEMPLATE_ELEMENT_CHILDREN:
-        readPackedOrRepeatedUint32(r, wireType, e.children);
-        break;
-      default:
-        if (strict) unknownField(field, "TemplateElement");
-        r.skip(wireType);
+function templateNodes(
+  ms: WireTemplateNode[],
+  strict: boolean,
+): TemplateNode[] {
+  const out: TemplateNode[] = [];
+  for (const n of ms) {
+    const kind = n.kind;
+    if (kind === undefined) {
+      // A `TemplateNode` naming no kind is wire content this receiver
+      // cannot act on, so strict mode rejects it — with its own message,
+      // since an absent oneof has no field number to report. Non-strict
+      // keeps the proto3 default (an empty text node).
+      if (strict) {
+        throw new Error(
+          `stream-dom: TemplateNode has no kind set (receiver PROTOCOL_VERSION ${PROTOCOL_VERSION})`,
+        );
+      }
+      out.push({ kind: "text", text: "" });
+    } else if (kind.$case === "text") {
+      out.push({ kind: "text", text: kind.value });
+    } else if (kind.$case === "dynamic") {
+      out.push({ kind: "dynamic" });
+    } else {
+      out.push({ kind: "element", element: templateElement(kind.value) });
     }
   }
-  return e;
+  return out;
 }
 
-function decodeTemplateNode(r: Reader, strict: boolean): TemplateNode {
-  let node: TemplateNode = { kind: "text", text: "" };
-  let sawKind = false;
-  while (!r.finished()) {
-    const [field, wireType] = r.readTag();
-    switch (field) {
-      case TEMPLATE_NODE_ELEMENT:
-        node = {
-          kind: "element",
-          element: decodeTemplateElement(r.readMessage(), strict),
-        };
-        sawKind = true;
-        break;
-      case TEMPLATE_NODE_TEXT:
-        node = { kind: "text", text: r.readString() };
-        sawKind = true;
-        break;
-      case TEMPLATE_NODE_DYNAMIC:
-        r.readMessage(); // Dynamic {} — no fields to read.
-        node = { kind: "dynamic" };
-        sawKind = true;
-        break;
-      default:
-        if (strict) unknownField(field, "TemplateNode");
-        r.skip(wireType);
+// -- strict-mode unknown-field walk ---------------------------------------
+
+/** Every generated message carries `_unknownFields` (`unknownFields=true`),
+ * keyed by the full tag; the field number is `tag >>> 3`. Empty (`{}`) when
+ * the message had none. */
+interface MaybeUnknown {
+  _unknownFields?: { [key: number]: Uint8Array[] } | undefined;
+}
+
+function checkUnknown(m: MaybeUnknown, name: string): void {
+  const u = m._unknownFields;
+  if (u === undefined) return;
+  for (const tag in u) {
+    unknownField(Number(tag) >>> 3, name);
+  }
+}
+
+/** Does `frame` carry an unknown field whose number is an `op` field
+ * number — an op case from a future schema version? Reproduces the old
+ * decoder's `sawAnyOpField` for cases it cannot decode. */
+function sawUnknownOpField(frame: Frame): boolean {
+  const u = frame._unknownFields;
+  if (u === undefined) return false;
+  for (const tag in u) {
+    if ((Number(tag) >>> 3) >= FRAME_OP_FIELD_MIN) return true;
+  }
+  return false;
+}
+
+function checkListenerUnknown(m: AddListener | RemoveListener): void {
+  const l = m.listener;
+  if (l !== undefined) checkUnknown(l, "Listener");
+}
+
+function checkTemplateUnknown(m: RegisterTemplate): void {
+  for (const n of m.nodes) {
+    checkUnknown(n, "TemplateNode");
+    const kind = n.kind;
+    if (kind !== undefined && kind.$case === "element") {
+      checkUnknown(kind.value, "TemplateElement");
+      for (const a of kind.value.attrs) checkUnknown(a, "TemplateAttr");
     }
   }
-  // A `TemplateNode` naming no kind is wire content this receiver cannot
-  // act on, so strict mode rejects it — with its own message, since an
-  // absent oneof has no field number to report. Non-strict keeps the
-  // proto3 default (an empty text node).
-  if (strict && !sawKind) {
-    throw new Error(
-      `stream-dom: TemplateNode has no kind set (receiver PROTOCOL_VERSION ${PROTOCOL_VERSION})`,
-    );
+}
+
+/** Reject anything on the wire this receiver does not know, in the same
+ * message-name vocabulary the hand-rolled decoder used. Runs only in
+ * strict mode; the non-strict path never touches `_unknownFields`. */
+function checkFrameStrict(frame: Frame): void {
+  checkUnknown(frame, "Frame");
+  const op = frame.op;
+  if (op === undefined) return;
+  switch (op.$case) {
+    case "intern":
+      checkUnknown(op.value, "Intern");
+      break;
+    case "createElement":
+      checkUnknown(op.value, "CreateElement");
+      break;
+    case "createText":
+      checkUnknown(op.value, "CreateText");
+      break;
+    case "createPlaceholder":
+      checkUnknown(op.value, "CreatePlaceholder");
+      break;
+    case "insertBefore":
+      checkUnknown(op.value, "InsertBefore");
+      break;
+    case "insertAfter":
+      checkUnknown(op.value, "InsertAfter");
+      break;
+    case "remove":
+      checkUnknown(op.value, "Remove");
+      break;
+    case "setText":
+      checkUnknown(op.value, "SetText");
+      break;
+    case "setAttribute":
+      checkUnknown(op.value, "SetAttribute");
+      break;
+    case "setProperty":
+      checkUnknown(op.value, "SetProperty");
+      break;
+    case "addListener":
+      checkUnknown(op.value, "AddListener");
+      checkListenerUnknown(op.value);
+      break;
+    case "removeListener":
+      checkUnknown(op.value, "RemoveListener");
+      checkListenerUnknown(op.value);
+      break;
+    case "registerTemplate":
+      checkUnknown(op.value, "RegisterTemplate");
+      checkTemplateUnknown(op.value);
+      break;
+    case "cloneTemplate":
+      checkUnknown(op.value, "CloneTemplate");
+      break;
+    case "bindPath":
+      checkUnknown(op.value, "BindPath");
+      break;
+    case "bindMarker":
+      checkUnknown(op.value, "BindMarker");
+      break;
   }
-  return node;
 }
 
 /** Hard ceiling on one frame's length prefix. A `uint32` varint can
@@ -411,6 +347,12 @@ function decodeTemplateNode(r: Reader, strict: boolean): TemplateNode {
  * decoder throws immediately, which aborts the stream
  * (docs/design.md "Policy", "The seam"). */
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
+/** A `uint32` varint is at most 5 bytes. `BinaryReader.uint32()` does not
+ * enforce that — it keeps consuming continuation bytes and wraps — and it
+ * reports "ran out of bytes" and "never terminated" the same way, so the
+ * length probe below bounds the width itself. */
+const MAX_VARINT32_BYTES = 5;
 
 /**
  * Feeds arbitrary byte chunks (a frame may straddle chunks per
@@ -454,313 +396,167 @@ export class FrameDecoder {
   #drain(): void {
     let offset = 0;
     const buf = this.#pending;
+    // One reader for the whole pending buffer: the length probe and the
+    // frame bodies share it (`Frame.decode(reader, len)` decodes in place),
+    // so a frame costs no allocation beyond the message objects. The
+    // reader's own bound is therefore the whole buffer, not the frame —
+    // the per-frame bound is the position check after each decode below.
+    const reader = new BinaryReader(buf);
     for (;;) {
       const lenStart = offset;
       let len: number;
+      let malformedPrefix = false;
       try {
-        const probe = new Reader(buf, lenStart, buf.length);
-        len = probe.readVarint32();
-        offset = probe.pos;
+        reader.pos = lenStart;
+        len = reader.uint32();
+        // Terminated, but only past the legal width for a u32: the value
+        // read is meaningless (`varint32read` keeps consuming continuation
+        // bytes and wraps), so it is as malformed as one that never
+        // terminated at all.
+        malformedPrefix = reader.pos - lenStart > MAX_VARINT32_BYTES;
       } catch (err) {
         // A genuine truncation (fewer bytes buffered than the varint
-        // needs) means "wait for more"; anything else (a malformed
-        // varint that is fully present but never terminates within the
-        // legal width) is a real protocol error and must not be treated
-        // as a buffering situation forever.
-        if (err instanceof TruncatedError) break;
-        throw err;
+        // needs) means "wait for more". The same `RangeError("premature
+        // EOF")` raised with all five legal bytes present means the varint
+        // is malformed, not incomplete — a real protocol error, which must
+        // not be treated as a buffering situation forever.
+        if (!(err instanceof RangeError)) throw err;
+        if (buf.length - lenStart < MAX_VARINT32_BYTES) break;
+        len = 0;
+        malformedPrefix = true;
       }
+      if (malformedPrefix) {
+        throw new RangeError(
+          "stream-dom: frame length prefix is not a valid u32 varint",
+        );
+      }
+      const bodyStart = reader.pos;
       if (len > MAX_FRAME_BYTES) {
         throw new Error(
           `stream-dom: frame length ${len} exceeds MAX_FRAME_BYTES (${MAX_FRAME_BYTES})`,
         );
       }
-      if (offset + len > buf.length) {
+      if (bodyStart + len > buf.length) {
         offset = lenStart; // Frame body straddles the buffer — wait for more.
         break;
       }
-      // Only the length probe above is allowed to treat a `TruncatedError`
-      // as "wait for more". Inside a frame whose bytes are all here, a
-      // truncated sub-message is a malformed frame and propagates out of
-      // `push`, aborting the stream.
-      const frame = new Reader(buf, offset, offset + len);
-      offset += len;
+      // Only the length probe above may treat a premature EOF as "wait for
+      // more" — it is deliberately outside this decode.
+      const frameEnd = bodyStart + len;
+      const frame = Frame.decode(reader, len);
+      if (reader.pos !== frameEnd) {
+        // The frame's own length is the only bound the shared reader has:
+        // a sub-message whose length runs past the frame end reads into
+        // the NEXT frame's bytes (over-consumption), and the generated
+        // decoder stops early — without throwing — on a zero tag or an
+        // end-group tag (under-consumption). Both are malformed frames in
+        // BOTH modes: a zero tag is invalid protobuf (field number 0 does
+        // not exist), and this receiver does not guess where a frame that
+        // does not fill its own length was meant to end.
+        throw new Error(
+          `stream-dom: malformed frame: decoder consumed ${
+            reader.pos - bodyStart
+          } of ${len} bytes`,
+        );
+      }
+      offset = frameEnd;
       this.#decodeFrame(frame);
     }
     this.#pending = buf.subarray(offset);
   }
 
-  #decodeFrame(r: Reader): void {
+  #decodeFrame(frame: Frame): void {
     this.#frameCount++;
-    let commit = false;
-    let sawAnyOpField = false;
-    let dispatch: (() => void) | undefined;
+    if (this.#strict) checkFrameStrict(frame);
 
-    while (!r.finished()) {
-      const [field, wireType] = r.readTag();
-      if (field === FRAME_COMMIT) {
-        commit = r.readBool();
-        continue;
+    const op = frame.op;
+    if (op === undefined) {
+      // An unknown field at an op field number is an op case this receiver
+      // does not know (a future schema version): the frame is skipped, but
+      // it did carry an op.
+      if (!frame.commit && !sawUnknownOpField(frame)) {
+        throw new Error("stream-dom: frame has no op and commit=false");
       }
-      if (field < FRAME_OP_FIELD_MIN) {
-        if (this.#strict) unknownField(field, "Frame");
-        r.skip(wireType);
-        continue;
-      }
-      sawAnyOpField = true;
-      switch (field) {
-        case FRAME_INTERN: {
-          const sub = r.readMessage();
-          let id = 0, s = "";
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === INTERN_ID) id = sub.readVarint32();
-            else if (f === INTERN_S) s = sub.readString();
-            else if (this.#strict) unknownField(f, "Intern");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.internString(id, s);
+    } else {
+      const sink = this.#sink;
+      switch (op.$case) {
+        case "intern":
+          sink.internString(op.value.id, op.value.s);
+          break;
+        case "createElement":
+          sink.createElement(op.value.id, op.value.tag, op.value.ns);
+          break;
+        case "createText":
+          sink.createText(op.value.id, op.value.text);
+          break;
+        case "createPlaceholder":
+          sink.createPlaceholder(op.value.id);
+          break;
+        case "insertBefore":
+          sink.insertBefore(op.value.parent, op.value.id, op.value.anchor);
+          break;
+        case "insertAfter":
+          sink.insertAfter(op.value.parent, op.value.id, op.value.anchor);
+          break;
+        case "remove":
+          sink.remove(op.value.id);
+          break;
+        case "setText":
+          sink.setText(op.value.id, op.value.text);
+          break;
+        case "setAttribute":
+          sink.setAttribute(
+            op.value.id,
+            op.value.name,
+            op.value.ns,
+            attrValue(op.value),
+          );
+          break;
+        case "setProperty": {
+          const v = op.value.value;
+          let value: PropertyValue;
+          if (v === undefined) value = { kind: "none" };
+          else if (v.$case === "text") value = { kind: "text", value: v.value };
+          else if (v.$case === "int") value = { kind: "int", value: v.value };
+          else if (v.$case === "float") {
+            value = { kind: "float", value: v.value };
+          } else value = { kind: "boolean", value: v.value };
+          sink.setProperty(op.value.id, op.value.name, value);
           break;
         }
-        case FRAME_CREATE_ELEMENT: {
-          const sub = r.readMessage();
-          let id = 0, tag = 0, ns: number | undefined;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === CREATE_ELEMENT_ID) id = sub.readVarint32();
-            else if (f === CREATE_ELEMENT_TAG) tag = sub.readVarint32();
-            else if (f === CREATE_ELEMENT_NS) ns = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "CreateElement");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.createElement(id, tag, ns);
+        case "addListener": {
+          // A present `AddListener` with no `Listener` set names no
+          // registration to make: the op field was there, so the frame is
+          // not "no op", but there is nothing to dispatch.
+          const l = op.value.listener;
+          if (l !== undefined) sink.addListener(listener(l));
           break;
         }
-        case FRAME_CREATE_TEXT: {
-          const sub = r.readMessage();
-          let id = 0, text = "";
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === CREATE_TEXT_ID) id = sub.readVarint32();
-            else if (f === CREATE_TEXT_TEXT) text = sub.readString();
-            else if (this.#strict) unknownField(f, "CreateText");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.createText(id, text);
+        case "removeListener": {
+          const l = op.value.listener;
+          if (l !== undefined) sink.removeListener(listener(l));
           break;
         }
-        case FRAME_CREATE_PLACEHOLDER: {
-          const sub = r.readMessage();
-          let id = 0;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === CREATE_PLACEHOLDER_ID) id = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "CreatePlaceholder");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.createPlaceholder(id);
+        case "registerTemplate":
+          sink.registerTemplate(
+            op.value.id,
+            templateNodes(op.value.nodes, this.#strict),
+            op.value.roots,
+          );
           break;
-        }
-        case FRAME_INSERT_BEFORE: {
-          const sub = r.readMessage();
-          let parent: number | undefined, id = 0, anchor: number | undefined;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === INSERT_BEFORE_PARENT) parent = sub.readVarint32();
-            else if (f === INSERT_BEFORE_ID) id = sub.readVarint32();
-            else if (f === INSERT_BEFORE_ANCHOR) anchor = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "InsertBefore");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.insertBefore(parent, id, anchor);
+        case "cloneTemplate":
+          sink.cloneTemplate(op.value.tmpl, op.value.root, op.value.id);
           break;
-        }
-        case FRAME_INSERT_AFTER: {
-          const sub = r.readMessage();
-          let parent: number | undefined, id = 0, anchor = 0;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === INSERT_AFTER_PARENT) parent = sub.readVarint32();
-            else if (f === INSERT_AFTER_ID) id = sub.readVarint32();
-            else if (f === INSERT_AFTER_ANCHOR) anchor = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "InsertAfter");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.insertAfter(parent, id, anchor);
+        case "bindPath":
+          // Copied, not aliased — see `attrValue`.
+          sink.bindPath(op.value.root, op.value.path.slice(), op.value.id);
           break;
-        }
-        case FRAME_REMOVE: {
-          const sub = r.readMessage();
-          let id = 0;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === REMOVE_ID) id = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "Remove");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.remove(id);
+        case "bindMarker":
+          sink.bindMarker(op.value.key, op.value.id);
           break;
-        }
-        case FRAME_SET_TEXT: {
-          const sub = r.readMessage();
-          let id = 0, text = "";
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === SET_TEXT_ID) id = sub.readVarint32();
-            else if (f === SET_TEXT_TEXT) text = sub.readString();
-            else if (this.#strict) unknownField(f, "SetText");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.setText(id, text);
-          break;
-        }
-        case FRAME_SET_ATTRIBUTE: {
-          const sub = r.readMessage();
-          let id = 0,
-            name = 0,
-            ns: number | undefined,
-            value: AttrValue | undefined;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === SET_ATTRIBUTE_ID) id = sub.readVarint32();
-            else if (f === SET_ATTRIBUTE_NAME) name = sub.readVarint32();
-            else if (f === SET_ATTRIBUTE_NS) ns = sub.readVarint32();
-            else if (f === SET_ATTRIBUTE_TEXT) {
-              value = { kind: "text", value: sub.readString() };
-            } else if (f === SET_ATTRIBUTE_ASSET) {
-              // Copied, not aliased — see decodeTemplateAttr's note.
-              value = { kind: "asset", handle: sub.readBytes() };
-            } else if (this.#strict) unknownField(f, "SetAttribute");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.setAttribute(id, name, ns, value);
-          break;
-        }
-        case FRAME_SET_PROPERTY: {
-          const sub = r.readMessage();
-          let id = 0, name = 0;
-          let value: PropertyValue = { kind: "none" };
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === SET_PROPERTY_ID) id = sub.readVarint32();
-            else if (f === SET_PROPERTY_NAME) name = sub.readVarint32();
-            else if (f === SET_PROPERTY_TEXT) {
-              value = { kind: "text", value: sub.readString() };
-            } else if (f === SET_PROPERTY_INT) {
-              value = { kind: "int", value: sub.readSInt64() };
-            } else if (f === SET_PROPERTY_FLOAT) {
-              value = { kind: "float", value: sub.readDouble() };
-            } else if (f === SET_PROPERTY_BOOLEAN) {
-              value = { kind: "boolean", value: sub.readBool() };
-            } else if (this.#strict) unknownField(f, "SetProperty");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.setProperty(id, name, value);
-          break;
-        }
-        case FRAME_ADD_LISTENER: {
-          const sub = r.readMessage();
-          let listener: Listener | undefined;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === ADD_LISTENER_LISTENER) {
-              listener = decodeListener(sub.readMessage(), this.#strict);
-            } else if (this.#strict) unknownField(f, "AddListener");
-            else sub.skip(wt);
-          }
-          if (listener) {
-            const l = listener;
-            dispatch = () => this.#sink.addListener(l);
-          }
-          break;
-        }
-        case FRAME_REMOVE_LISTENER: {
-          const sub = r.readMessage();
-          let listener: Listener | undefined;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === REMOVE_LISTENER_LISTENER) {
-              listener = decodeListener(sub.readMessage(), this.#strict);
-            } else if (this.#strict) unknownField(f, "RemoveListener");
-            else sub.skip(wt);
-          }
-          if (listener) {
-            const l = listener;
-            dispatch = () => this.#sink.removeListener(l);
-          }
-          break;
-        }
-        case FRAME_REGISTER_TEMPLATE: {
-          const sub = r.readMessage();
-          let id = 0;
-          const nodes: TemplateNode[] = [];
-          const roots: number[] = [];
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === REGISTER_TEMPLATE_ID) id = sub.readVarint32();
-            else if (f === REGISTER_TEMPLATE_NODES) {
-              nodes.push(decodeTemplateNode(sub.readMessage(), this.#strict));
-            } else if (f === REGISTER_TEMPLATE_ROOTS) {
-              readPackedOrRepeatedUint32(sub, wt, roots);
-            } else if (this.#strict) unknownField(f, "RegisterTemplate");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.registerTemplate(id, nodes, roots);
-          break;
-        }
-        case FRAME_CLONE_TEMPLATE: {
-          const sub = r.readMessage();
-          let tmpl = 0, root = 0, id = 0;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === CLONE_TEMPLATE_TMPL) tmpl = sub.readVarint32();
-            else if (f === CLONE_TEMPLATE_ROOT) root = sub.readVarint32();
-            else if (f === CLONE_TEMPLATE_ID) id = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "CloneTemplate");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.cloneTemplate(tmpl, root, id);
-          break;
-        }
-        case FRAME_BIND_PATH: {
-          const sub = r.readMessage();
-          let root = 0, id = 0;
-          let path: Uint8Array = new Uint8Array(0);
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === BIND_PATH_ROOT) root = sub.readVarint32();
-            else if (f === BIND_PATH_PATH) path = sub.readBytes();
-            else if (f === BIND_PATH_ID) id = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "BindPath");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.bindPath(root, path, id);
-          break;
-        }
-        case FRAME_BIND_MARKER: {
-          const sub = r.readMessage();
-          let key = 0, id = 0;
-          while (!sub.finished()) {
-            const [f, wt] = sub.readTag();
-            if (f === BIND_MARKER_KEY) key = sub.readVarint32();
-            else if (f === BIND_MARKER_ID) id = sub.readVarint32();
-            else if (this.#strict) unknownField(f, "BindMarker");
-            else sub.skip(wt);
-          }
-          dispatch = () => this.#sink.bindMarker(key, id);
-          break;
-        }
-        default:
-          // Unknown op field: skip the frame's bytes, still honor commit.
-          if (this.#strict) unknownField(field, "Frame");
-          r.skip(wireType);
       }
     }
 
-    if (!commit && !sawAnyOpField) {
-      throw new Error("stream-dom: frame has no op and commit=false");
-    }
-    if (dispatch) dispatch();
-    if (commit) this.#sink.commit();
+    if (frame.commit) this.#sink.commit();
   }
 }

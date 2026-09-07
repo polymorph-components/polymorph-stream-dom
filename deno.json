@@ -7,6 +7,7 @@
     "@polyengine/translator": "jsr:@polyengine/translator@^0.6.2",
     "@polyengine/protocol": "jsr:@polyengine/protocol@^0.3.1",
     "@polyengine/wasi": "jsr:@polyengine/wasi@^0.6.2",
+    "@bufbuild/protobuf/wire": "npm:@bufbuild/protobuf@^2.14.1/wire",
     "@remote-dom/core": "npm:@remote-dom/core@^1.11.1",
     "@remote-dom/core/receivers": "npm:@remote-dom/core@^1.11.1/receivers",
     "@remote-dom/core/elements": "npm:@remote-dom/core@^1.11.1/elements",
@@ -21,6 +22,12 @@
   "compilerOptions": {
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"],
     "strict": true
+  },
+  "fmt": {
+    "exclude": ["receiver/src/gen/"]
+  },
+  "lint": {
+    "exclude": ["receiver/src/gen/"]
   },
   "tasks": {
     "check": "deno check receiver/src receiver/tests web/build.ts web/translate.ts web/entry.ts web/bench.ts web/e2e bench/tachometer.ts bench/run.ts bench/wire.ts host/desktop/ui host/desktop/build.ts host/desktop/e2e",

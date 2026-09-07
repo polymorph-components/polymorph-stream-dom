@@ -14,7 +14,9 @@ import type {
 } from "../src/frames.ts";
 import { assertPolicyVersion, PolicyError, PolicySink } from "../src/policy.ts";
 import type { Policy, PolicyOp } from "../src/policy.ts";
-import { Writer } from "../src/proto.ts";
+import { BinaryWriter } from "@bufbuild/protobuf/wire";
+import { Frame } from "../src/gen/stream-dom.ts";
+import { frame } from "./wire.ts";
 import { RemoteDomTranscoder } from "../src/remote.ts";
 import type { RemoteConnection, RemoteMutationRecord } from "@remote-dom/core";
 
@@ -97,18 +99,10 @@ class RecordingSink implements FrameSink {
   }
 }
 
-/** One length-delimited `Frame` on the wire. */
-function frame(build: (w: Writer) => void): Uint8Array {
-  const body = new Writer();
-  build(body);
-  const bytes = body.finish();
-  const out = new Writer();
-  out.writeVarint32(bytes.length);
-  const prefix = out.finish();
-  const framed = new Uint8Array(prefix.length + bytes.length);
-  framed.set(prefix, 0);
-  framed.set(bytes, prefix.length);
-  return framed;
+/** One length-delimited `Frame` on the wire, from a generated-writer
+ * body. */
+function wellFormed(op: Frame["op"], commit = false): Uint8Array {
+  return frame(Frame.encode({ commit, op }).finish());
 }
 
 /** A policy that records what it saw and rejects whatever `reject` says. */
@@ -153,10 +147,10 @@ Deno.test("PROTOCOL_VERSION matches proto/stream-dom.proto's header line", async
 
 Deno.test("strict decoder rejects an unknown Frame op field; open decoder skips it", () => {
   // Field 30 is not an op this receiver knows (Frame's ops stop at 17).
-  const bytes = frame((w) => {
-    w.writeBool(1, true); // Frame.commit
-    w.writeMessage(30, (unknown) => unknown.writeUint32(1, 5));
-  });
+  const body = new BinaryWriter();
+  body.uint32((1 << 3) | 0).bool(true); // Frame.commit
+  body.uint32((30 << 3) | 2).fork().uint32((1 << 3) | 0).uint32(5).join();
+  const bytes = frame(body.finish());
 
   const open = new RecordingSink();
   new FrameDecoder(open).push(bytes);
@@ -172,13 +166,13 @@ Deno.test("strict decoder rejects an unknown Frame op field; open decoder skips 
 
 Deno.test("strict decoder rejects an unknown sub-message field; open decoder skips it", () => {
   // CreateElement { id: 7, tag: 1, <unknown field 9> }.
-  const bytes = frame((w) => {
-    w.writeMessage(6, (ce) => {
-      ce.writeUint32(1, 7);
-      ce.writeUint32(2, 1);
-      ce.writeUint32(9, 123);
-    });
-  });
+  const body = new BinaryWriter();
+  body.uint32((6 << 3) | 2).fork()
+    .uint32((1 << 3) | 0).uint32(7)
+    .uint32((2 << 3) | 0).uint32(1)
+    .uint32((9 << 3) | 0).uint32(123)
+    .join();
+  const bytes = frame(body.finish());
 
   const open = new RecordingSink();
   new FrameDecoder(open).push(bytes);
@@ -195,11 +189,15 @@ Deno.test("strict decoder rejects an unknown sub-message field; open decoder ski
 });
 
 Deno.test("an unknown Global enum value is rejected in both modes", () => {
-  const bytes = frame((w) => {
-    w.writeMessage(12, (add) => {
-      add.writeMessage(1, (l) => l.writeUint32(8, 99)); // Listener.global = 99
-    });
-  });
+  // Listener.global = 99, a value outside the `Global` enum: built by hand
+  // because the generated writer's `Global` type admits only the two.
+  const body = new BinaryWriter();
+  body.uint32((12 << 3) | 2).fork()
+    .uint32((1 << 3) | 2).fork()
+    .uint32((8 << 3) | 0).int32(99)
+    .join()
+    .join();
+  const bytes = frame(body.finish());
   for (const strict of [false, true]) {
     assertThrows(
       () => new FrameDecoder(new RecordingSink(), { strict }).push(bytes),
@@ -213,14 +211,14 @@ Deno.test("an unknown Global enum value is rejected in both modes", () => {
 
 Deno.test("SetAttribute's asset arm (field 5) decodes to an asset handle", () => {
   const handle = Uint8Array.of(0, 1, 2, 3);
-  const bytes = frame((w) => {
-    w.writeMessage(4, (sa) => {
-      sa.writeUint32(1, 10); // id
-      sa.writeUint32(2, 3); // name
-      sa.writeTag(5, 2); // SetAttribute.asset
-      sa.writeVarint32(handle.length);
-      for (const b of handle) sa.writeVarint32(b);
-    });
+  const bytes = wellFormed({
+    $case: "setAttribute",
+    value: {
+      id: 10,
+      name: 3,
+      ns: undefined,
+      value: { $case: "asset", value: handle },
+    },
   });
   const sink = new RecordingSink();
   new FrameDecoder(sink).push(bytes);
@@ -235,22 +233,27 @@ Deno.test("SetAttribute's asset arm (field 5) decodes to an asset handle", () =>
 
 Deno.test("TemplateAttr's asset arm (field 4) decodes to an asset handle", () => {
   const handle = Uint8Array.of(9, 8);
-  const bytes = frame((w) => {
-    w.writeMessage(15, (rt) => {
-      rt.writeUint32(1, 1); // RegisterTemplate.id
-      rt.writeMessage(2, (node) => {
-        node.writeMessage(1, (el) => {
-          el.writeUint32(1, 1); // TemplateElement.tag
-          el.writeMessage(3, (attr) => {
-            attr.writeUint32(1, 3); // TemplateAttr.name
-            attr.writeTag(4, 2); // TemplateAttr.asset
-            attr.writeVarint32(handle.length);
-            for (const b of handle) attr.writeVarint32(b);
-          });
-        });
-      });
-      rt.writeUint32(3, 0); // roots = [0]
-    });
+  const bytes = wellFormed({
+    $case: "registerTemplate",
+    value: {
+      id: 1,
+      nodes: [{
+        kind: {
+          $case: "element",
+          value: {
+            tag: 1,
+            ns: undefined,
+            attrs: [{
+              name: 3,
+              ns: undefined,
+              value: { $case: "asset", value: handle },
+            }],
+            children: [],
+          },
+        },
+      }],
+      roots: [0],
+    },
   });
   const sink = new RecordingSink();
   new FrameDecoder(sink).push(bytes);

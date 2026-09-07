@@ -190,27 +190,32 @@ draft, for four things it could not offer cheaply:
   bump. Open questions 9 and 10 will touch existing ops.
 - **Tooling.** `protoc --decode` and `buf` read the corpus; the
   frame-to-text decoder the corpus needs is stock.
-- **Generated codecs** in every producer language (prost, pbf,
+- **Generated codecs** in every producer language (prost, ts-proto,
   protobuf-go, Kotlin) instead of ~20 hand-written layouts per language,
   forever.
 - **Events in the same schema.** The remote tier needed a second
   hand-rolled encoding for event payloads; now it is the same file.
 
 The cost is decode speed with *generated* readers, which build an object
-per message — roughly the cost profile of the typed lift declined above.
-pbf (mapbox) removes it: alongside `.proto`-generated readers it exposes
-`readFields((tag, obj, pbf) => …)` with `readVarint` / `readString` /
-`skip`, so the hot structural ops are decoded with a switch on field tag
-straight into DOM calls, no intermediate object, while cold ops
-(`register-template`, nested messages) use the generated readers. Same
-`.proto`, same library, ~3 KB; built for Mapbox vector tiles, which is the
-same shape of problem. Its writer side (`writeVarintField`,
-`writeStringField`, `writeMessage`) gives the JS producer adapters and the
-remote-dom transcoder an allocation-light encoder. protobuf.js has the
-equivalent `Reader` / `pbjs` split and is the fallback if pbf's codegen
-proves too thin; protobuf-es or ts-proto only if generated TypeScript
-types are wanted, since pbf emits JS with JSDoc. Rust layers the same way:
-prost generated code by default, `prost::encoding`'s public
+per message. Measured, not assumed: `bench/decoders` (an untracked
+harness) replays the bench producers' real captured streams — 19 of them,
+every op the producers emit — through each candidate JS codec against the
+same `FrameSink`. Generated readers won. ts-proto over
+`@bufbuild/protobuf/wire` decodes at ~0.7x the time of the hand-rolled
+tag-switch decoder it replaced, and a hand-driven hybrid over the same
+runtime was no faster. protobuf.js generated is 4x slower. pbf is the
+fastest arm and unusable: it silently loses precision on `sint64` above
+2^53, has no bounds checks, and cannot represent proto3 `optional`
+presence, which this schema uses for `ns`, `parent` and `anchor`.
+
+So: the JS receiver uses ts-proto generated readers *and* writers (event
+payloads included) over `@bufbuild/protobuf/wire`, and contains no
+hand-written wire code. A hand path returns only if profiling the real
+receiver singles out an op. Codegen runs `buf` from npm under Deno, which
+spawns the ts-proto plugin through `deno run` — no Node, no protoc
+(`just proto-ts`). The generated code is committed and drift-gated:
+`just check` regenerates into a temp dir and diffs. Rust layers the same
+way: prost generated code by default, `prost::encoding`'s public
 `encode_varint` / `encode_key` for a hand-written hot encoder if a profile
 asks for one.
 
@@ -1221,10 +1226,10 @@ event families beyond mouse/keyboard/form, files and `DataTransfer`.
 5. **Resync.** `reset` semantics and whether a full snapshot is a special
    batch or the normal initial-mount batch replayed. Also the id-space
    exhaustion path, since ids are never reused.
-6. **Codec tiers.** Whether the pbf hybrid decode is needed at all, or
-   generated readers are fast enough: measure both on the corpus before
-   writing the hand-switch. Whether generated TypeScript types (ts-proto,
-   protobuf-es) are worth a second toolchain beside pbf.
+6. **Codec tiers.** *Settled by measurement* (`bench/decoders`, see
+   "Encoding"): generated readers are the codec. ts-proto over
+   `@bufbuild/protobuf/wire` beat the hand-rolled decoder and the hybrids;
+   a hand path only if profiling the real receiver demands one.
 7. **Conformance corpus.** Recorded length-delimited `Frame` streams
    (`.pb`) plus the event payloads that answer them, as the shared test
    vector across adapters × transports; readable with stock protobuf

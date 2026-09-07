@@ -7,11 +7,31 @@ default: check test
 # for the wasm target, the native host workspace; TS: receiver + web +
 # desktop UI). Depends on desktop-ui because tauri's generate_context!
 # refuses to compile without the frontendDist directory present.
-check: desktop-ui
+check: desktop-ui proto-drift
     cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
     cargo clippy --manifest-path guests/web-sys/Cargo.toml --workspace --target wasm32-wasip2 -- -D warnings
     cargo clippy --manifest-path host/Cargo.toml --workspace -- -D warnings
     deno task check
+
+# Regenerate the receiver's protobuf readers/writers from proto/ into
+# receiver/src/gen/. `buf` runs from npm under Deno and spawns the ts-proto
+# plugin through `deno run`, so this needs no Node and no protoc.
+proto-ts:
+    deno run -A npm:@bufbuild/buf@1.72.0 generate
+
+# Drift gate for the committed generated code: regenerate into a temp dir
+# and compare. `buf generate -o <dir>` reproduces the plugin's `out` path
+# under it, so the comparison is <tmp>/receiver/src/gen vs receiver/src/gen.
+proto-drift:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    deno run -A npm:@bufbuild/buf@1.72.0 generate --template buf.gen.yaml -o "$tmp"
+    if ! diff -r "$tmp/receiver/src/gen" receiver/src/gen; then
+        echo "receiver/src/gen is out of date with proto/ — run \`just proto-ts\`" >&2
+        exit 1
+    fi
 
 # Native unit tests (encoder, transcoder fixtures) + receiver tests + the
 # wasmtime host, whose integration test runs the TodoMVC component.

@@ -1,0 +1,16 @@
+version: v2
+plugins:
+  - local: ["deno", "run", "-A", "npm:ts-proto@2.12.2/protoc-gen-ts_proto"]
+    out: receiver/src/gen
+    opt:
+      - forceLong=number
+      - oneof=unions-value
+      - outputJsonMethods=false
+      - outputPartialMethods=false
+      - outputClientImpl=false
+      - outputServices=false
+      - esModuleInterop=true
+      - importSuffix=.ts
+      - unknownFields=true
+      - env=browser
+      - annotateFilesWithVersion=false

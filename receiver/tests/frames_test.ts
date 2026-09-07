@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { FrameDecoder } from "../src/frames.ts";
-import { Writer } from "../src/proto.ts";
+import { Frame, Global } from "../src/gen/stream-dom.ts";
+import { frame } from "./wire.ts";
 import type {
   AttrValue,
   FrameSink,
@@ -255,27 +256,41 @@ Deno.test("FrameDecoder throws (does not silently wait forever) on a malformed l
   assertThrows(() => decoder.push(malformed));
 });
 
-// Global.DOCUMENT (value 1) isn't exercised by basic.pb (which only uses
-// WINDOW), so hand-encode a frame for it: Frame.add_listener (field 12) ->
-// AddListener.listener (field 1) -> Listener.global (field 8, enum varint).
-Deno.test("FrameDecoder decodes Listener.target = Global(DOCUMENT)", () => {
-  const inner = new Writer();
-  inner.writeBool(1, false); // Frame.commit
-  inner.writeMessage(12, (addListenerW) => {
-    addListenerW.writeMessage(1, (listenerW) => {
-      listenerW.writeUint32(8, 1); // Global.DOCUMENT = 1
-      listenerW.writeUint32(2, 42); // Listener.name
-    });
-  });
-  const frameBytes = inner.finish();
-
-  const lengthPrefix = new Writer();
-  lengthPrefix.writeVarint32(frameBytes.length);
-  const framed = new Uint8Array(
-    lengthPrefix.finish().length + frameBytes.length,
+Deno.test("FrameDecoder throws on a continuation-only length prefix past the legal width", () => {
+  const sink = new RecordingSink();
+  const decoder = new FrameDecoder(sink);
+  // Six continuation bytes and no terminator: a u32 varint is at most
+  // five, so this can never become a valid length however many bytes
+  // follow. `BinaryReader.uint32()` reports it the same way it reports a
+  // genuine truncation, so the decoder's five-byte probe window — not the
+  // reader — is what tells the two apart.
+  assertThrows(() =>
+    decoder.push(Uint8Array.of(0x80, 0x80, 0x80, 0x80, 0x80, 0x80))
   );
-  framed.set(lengthPrefix.finish(), 0);
-  framed.set(frameBytes, lengthPrefix.finish().length);
+});
+
+// Global.DOCUMENT (value 1) isn't exercised by basic.pb (which only uses
+// WINDOW), so build a frame for it with the generated writer.
+Deno.test("FrameDecoder decodes Listener.target = Global(DOCUMENT)", () => {
+  const framed = frame(
+    Frame.encode({
+      commit: false,
+      op: {
+        $case: "addListener",
+        value: {
+          listener: {
+            target: { $case: "global", value: Global.DOCUMENT },
+            name: 42,
+            bubbles: false,
+            capture: false,
+            passive: false,
+            preventDefault: false,
+            stopPropagation: false,
+          },
+        },
+      },
+    }).finish(),
+  );
 
   const sink = new RecordingSink();
   const decoder = new FrameDecoder(sink);
