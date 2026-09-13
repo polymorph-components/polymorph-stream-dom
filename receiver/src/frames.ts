@@ -15,16 +15,17 @@ import {
   type RegisterTemplate,
   type RemoveListener,
   type SetAttribute,
+  type SetTextControlState as WireTextControlState,
   type TemplateAttr as WireTemplateAttr,
   type TemplateElement as WireTemplateElement,
   type TemplateNode as WireTemplateNode,
 } from "./gen/stream-dom.ts";
 
 /** The wire protocol version this receiver implements — the number on
- * proto/stream-dom.proto's `// PROTOCOL VERSION: 1` header line, which is
+ * proto/stream-dom.proto's `// PROTOCOL VERSION: 2` header line, which is
  * normative (a receiver test re-reads it from the .proto). An additive
  * change (new oneof case, field or enum value) bumps it there and here. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Strict-mode rejection of wire content this receiver does not know: an
  * open receiver skips it, a receiver enforcing a policy must not
@@ -79,6 +80,13 @@ export type PropertyValue =
   | { kind: "boolean"; value: boolean }
   | { kind: "none" };
 
+export interface TextControlState {
+  value: string;
+  selectionStart: number;
+  selectionEnd: number;
+  direction: "none" | "forward" | "backward";
+}
+
 export interface TemplateAttr {
   name: number;
   ns: number | undefined;
@@ -128,6 +136,7 @@ export interface FrameSink {
     value: AttrValue | undefined,
   ): void;
   setProperty(id: number, name: number, value: PropertyValue): void;
+  setTextControlState(id: number, state: TextControlState): void;
   addListener(listener: Listener): void;
   removeListener(listener: Listener): void;
   registerTemplate(id: number, nodes: TemplateNode[], roots: number[]): void;
@@ -276,6 +285,20 @@ function checkTemplateUnknown(m: RegisterTemplate): void {
   }
 }
 
+function textControlState(m: WireTextControlState): TextControlState {
+  const direction = m.direction;
+  return {
+    value: m.value,
+    selectionStart: m.selectionStart,
+    selectionEnd: m.selectionEnd,
+    direction: direction === 1
+      ? "forward"
+      : direction === 2
+      ? "backward"
+      : "none",
+  };
+}
+
 /** Reject anything on the wire this receiver does not know, in the same
  * message-name vocabulary the hand-rolled decoder used. Runs only in
  * strict mode; the non-strict path never touches `_unknownFields`. */
@@ -313,6 +336,14 @@ function checkFrameStrict(frame: Frame): void {
       break;
     case "setProperty":
       checkUnknown(op.value, "SetProperty");
+      break;
+    case "setTextControlState":
+      checkUnknown(op.value, "SetTextControlState");
+      if (op.value.direction < 0 || op.value.direction > 2) {
+        throw new Error(
+          `stream-dom: SetTextControlState.direction unknown value ${op.value.direction}`,
+        );
+      }
       break;
     case "addListener":
       checkUnknown(op.value, "AddListener");
@@ -524,6 +555,9 @@ export class FrameDecoder {
           sink.setProperty(op.value.id, op.value.name, value);
           break;
         }
+        case "setTextControlState":
+          sink.setTextControlState(op.value.id, textControlState(op.value));
+          break;
         case "addListener": {
           // A present `AddListener` with no `Listener` set names no
           // registration to make: the op field was there, so the frame is

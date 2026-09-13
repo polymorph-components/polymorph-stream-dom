@@ -18,6 +18,10 @@
 pub mod events;
 pub mod writer;
 
+pub use events::{
+    text_control_state, TextControlDataExt, TextControlSelectionDirection, TextControlState,
+};
+
 #[cfg(target_arch = "wasm32")]
 pub mod driver;
 

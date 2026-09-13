@@ -38,6 +38,18 @@ export enum KeyLocation {
 }
 
 /**
+ * A textarea or text-like input's live value and selection. This is optional
+ * top-level event context rather than a family: input events still need their
+ * FormData, while select/selectionchange events have no other payload.
+ */
+export enum SelectionDirection {
+  SELECTION_DIRECTION_NONE = 0,
+  SELECTION_DIRECTION_FORWARD = 1,
+  SELECTION_DIRECTION_BACKWARD = 2,
+  UNRECOGNIZED = -1,
+}
+
+/**
  * Keyboard modifiers held during the event: the DOM's altKey / ctrlKey /
  * metaKey / shiftKey. Absent means none held.
  */
@@ -170,6 +182,20 @@ export interface FormData {
    * Dioxus adapter wanting that reads the controls it needs instead.
    */
   fields: FormField[];
+  _unknownFields?: { [key: number]: Uint8Array[] } | undefined;
+}
+
+export interface TextControlData {
+  value: string;
+  /** DOM selectionStart/selectionEnd: UTF-16 code-unit offsets. */
+  selectionStart: number;
+  selectionEnd: number;
+  direction: SelectionDirection;
+  /**
+   * True during an IME composition. A producer can defer controlled value
+   * updates until a later event reports false.
+   */
+  isComposing: boolean;
   _unknownFields?: { [key: number]: Uint8Array[] } | undefined;
 }
 
@@ -377,6 +403,7 @@ export interface EventPayload {
     | { $case: "visible"; value: VisibleData }
     | { $case: "navigation"; value: NavigationData }
     | undefined;
+  textControl?: TextControlData | undefined;
   _unknownFields?: { [key: number]: Uint8Array[] } | undefined;
 }
 
@@ -1270,6 +1297,112 @@ export const FormData: MessageFns<FormData> = {
             }
 
             message.fields.push(FormField.decode(reader, reader.uint32()));
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        const buf = reader.skip(tag & 7);
+
+        const list = message._unknownFields![tag];
+
+        if (list === undefined) {
+          message._unknownFields![tag] = [buf];
+        } else {
+          list.push(buf);
+        }
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+};
+
+function createBaseTextControlData(): TextControlData {
+  return { value: "", selectionStart: 0, selectionEnd: 0, direction: 0, isComposing: false, _unknownFields: {} };
+}
+
+export const TextControlData: MessageFns<TextControlData> = {
+  encode(message: TextControlData, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.value !== "") {
+      writer.uint32(10).string(message.value);
+    }
+    if (message.selectionStart !== 0) {
+      writer.uint32(16).uint32(message.selectionStart);
+    }
+    if (message.selectionEnd !== 0) {
+      writer.uint32(24).uint32(message.selectionEnd);
+    }
+    if (message.direction !== 0) {
+      writer.uint32(32).int32(message.direction);
+    }
+    if (message.isComposing !== false) {
+      writer.uint32(40).bool(message.isComposing);
+    }
+    if (message._unknownFields !== undefined) {
+      for (const [key, values] of globalThis.Object.entries(message._unknownFields)) {
+        const tag = parseInt(key, 10);
+        for (const value of values) {
+          writer.uint32(tag).raw(value);
+        }
+      }
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TextControlData {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseTextControlData();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.value = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.selectionStart = reader.uint32();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.selectionEnd = reader.uint32();
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.direction = reader.int32() as any;
+            continue;
+          }
+          case 5: {
+            if (tag !== 40) {
+              break;
+            }
+
+            message.isComposing = reader.bool();
             continue;
           }
         }
@@ -2419,7 +2552,7 @@ export const NavigationData: MessageFns<NavigationData> = {
 };
 
 function createBaseEventPayload(): EventPayload {
-  return { family: undefined, _unknownFields: {} };
+  return { family: undefined, textControl: undefined, _unknownFields: {} };
 }
 
 export const EventPayload: MessageFns<EventPayload> = {
@@ -2467,6 +2600,9 @@ export const EventPayload: MessageFns<EventPayload> = {
       case "navigation":
         NavigationData.encode(message.family.value, writer.uint32(114).fork()).join();
         break;
+    }
+    if (message.textControl !== undefined) {
+      TextControlData.encode(message.textControl, writer.uint32(122).fork()).join();
     }
     if (message._unknownFields !== undefined) {
       for (const [key, values] of globalThis.Object.entries(message._unknownFields)) {
@@ -2602,6 +2738,14 @@ export const EventPayload: MessageFns<EventPayload> = {
             }
 
             message.family = { $case: "navigation", value: NavigationData.decode(reader, reader.uint32()) };
+            continue;
+          }
+          case 15: {
+            if (tag !== 122) {
+              break;
+            }
+
+            message.textControl = TextControlData.decode(reader, reader.uint32());
             continue;
           }
         }

@@ -11,6 +11,7 @@ import type { ProducerEventTarget } from "../src/driver.ts";
 import { PROTOCOL_VERSION } from "../src/frames.ts";
 import { PolicyError } from "../src/policy.ts";
 import type { Policy } from "../src/policy.ts";
+import { EventPayload } from "../src/gen/stream-dom-events.ts";
 import { Frame } from "../src/gen/stream-dom.ts";
 import { frame as framed, stream } from "./wire.ts";
 
@@ -79,6 +80,37 @@ function frame(commit: boolean, op?: Frame["op"]): Uint8Array {
 }
 
 const DIV = 1, CLICK = 2;
+
+function textControlFrames(
+  listener: "input" | "select" | "selectionchange",
+): Uint8Array[] {
+  return [
+    frame(false, { $case: "intern", value: { id: 20, s: "textarea" } }),
+    frame(false, { $case: "intern", value: { id: 21, s: listener } }),
+    frame(false, {
+      $case: "createElement",
+      value: { id: 22, tag: 20, ns: undefined },
+    }),
+    frame(false, {
+      $case: "insertBefore",
+      value: { parent: 0, id: 22, anchor: undefined },
+    }),
+    frame(true, {
+      $case: "addListener",
+      value: {
+        listener: {
+          target: { $case: "id", value: 22 },
+          name: 21,
+          bubbles: true,
+          capture: false,
+          passive: false,
+          preventDefault: false,
+          stopPropagation: false,
+        },
+      },
+    }),
+  ];
+}
 
 /** intern(div), create-element(10, div), insert(root, 10), create-text(11,
  * "hi"), insert(10, 11), set-text(11, "hi there"), commit. */
@@ -183,6 +215,98 @@ Deno.test("Driver: a bubbling click listener fires handleEvent with the right ta
   assertEquals(nameRef, CLICK);
   assertEquals(payload.length > 0, true); // click -> mouse payload
 
+  withGlobalWindow(win, () => driver.dispose());
+});
+
+Deno.test("Driver: input-only listener observes composition tracked at the root", async () => {
+  const { win, root } = fixture();
+  let payload: Uint8Array | undefined;
+  const driver = createDriver({
+    root,
+    handleEvent: (_target, _name, bytes) => payload = bytes,
+  });
+  await pushAndAwaitCommit(driver, stream(...textControlFrames("input")));
+  const textarea = root.querySelector("textarea") as HTMLTextAreaElement;
+  Object.defineProperties(textarea, {
+    selectionStart: { value: 1, configurable: true },
+    selectionEnd: { value: 1, configurable: true },
+    selectionDirection: { value: "none", configurable: true },
+  });
+  textarea.value = "文";
+  const EventCtor = (win as unknown as { Event: typeof Event }).Event;
+  textarea.dispatchEvent(new EventCtor("compositionstart", { bubbles: true }));
+  textarea.dispatchEvent(new EventCtor("input", { bubbles: true }));
+  assertEquals(EventPayload.decode(payload!).textControl?.isComposing, true);
+  textarea.dispatchEvent(new EventCtor("compositionend", { bubbles: true }));
+  textarea.dispatchEvent(new EventCtor("input", { bubbles: true }));
+  assertEquals(EventPayload.decode(payload!).textControl?.isComposing, false);
+
+  const nativeComposing = new EventCtor("input", { bubbles: true });
+  Object.defineProperty(nativeComposing, "isComposing", { value: true });
+  textarea.dispatchEvent(nativeComposing);
+  assertEquals(EventPayload.decode(payload!).textControl?.isComposing, true);
+  withGlobalWindow(win, () => driver.dispose());
+});
+
+Deno.test("Driver: selection-only listener receives value and range", async () => {
+  const { win, root } = fixture();
+  let payload: Uint8Array | undefined;
+  const driver = createDriver({
+    root,
+    handleEvent: (_target, _name, bytes) => payload = bytes,
+  });
+  await pushAndAwaitCommit(driver, stream(...textControlFrames("select")));
+  const textarea = root.querySelector("textarea") as HTMLTextAreaElement;
+  textarea.value = "A💡B";
+  Object.defineProperties(textarea, {
+    selectionStart: { value: 1, configurable: true },
+    selectionEnd: { value: 3, configurable: true },
+    selectionDirection: { value: "backward", configurable: true },
+  });
+  textarea.dispatchEvent(
+    new (win as unknown as { Event: typeof Event }).Event("select", {
+      bubbles: true,
+    }),
+  );
+  assertEquals(EventPayload.decode(payload!).textControl, {
+    value: "A💡B",
+    selectionStart: 1,
+    selectionEnd: 3,
+    direction: 2,
+    isComposing: false,
+    _unknownFields: {},
+  });
+  withGlobalWindow(win, () => driver.dispose());
+});
+
+Deno.test("Driver: document selectionchange is routed from the active text control", async () => {
+  const { win, doc, root } = fixture();
+  let payload: Uint8Array | undefined;
+  const driver = createDriver({
+    root,
+    handleEvent: (_target, _name, bytes) => payload = bytes,
+  });
+  await pushAndAwaitCommit(
+    driver,
+    stream(...textControlFrames("selectionchange")),
+  );
+  const textarea = root.querySelector("textarea") as HTMLTextAreaElement;
+  textarea.value = "A💡B";
+  Object.defineProperties(textarea, {
+    selectionStart: { value: 1, configurable: true },
+    selectionEnd: { value: 3, configurable: true },
+    selectionDirection: { value: "backward", configurable: true },
+  });
+  Object.defineProperty(doc, "activeElement", {
+    value: textarea,
+    configurable: true,
+  });
+
+  doc.dispatchEvent(
+    new (win as unknown as { Event: typeof Event }).Event("selectionchange"),
+  );
+  assertEquals(EventPayload.decode(payload!).textControl?.value, "A💡B");
+  assertEquals(EventPayload.decode(payload!).textControl?.selectionEnd, 3);
   withGlobalWindow(win, () => driver.dispose());
 });
 

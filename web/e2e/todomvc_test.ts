@@ -141,6 +141,57 @@ Deno.test("TodoMVC demos", async (t) => {
             await assertVisibleCount(page.locator(".todo-list li"), 0);
             assertEquals(consoleErrors, [], "queued export console errors");
             assertEquals(pageErrors, [], "queued export page errors");
+
+            // A real keyboard selection-only change carries the unchanged
+            // value and UTF-16 range to Rust. On a later task, a synthetic
+            // button click changes both value and range atomically without
+            // moving focus.
+            const selectionProbe = page.getByRole("textbox", {
+              name: "Selection probe",
+            });
+            await selectionProbe.focus();
+            await selectionProbe.press("Home");
+            await selectionProbe.press("Shift+ArrowRight");
+            await assertText(
+              page.getByRole("status", { name: "Observed selection" }),
+              "0:1",
+            );
+            await selectionProbe.evaluate((node) => {
+              (node as HTMLTextAreaElement).setSelectionRange(5, 5, "none");
+            });
+            await page.getByRole("button", { name: "Restore selection" })
+              .evaluate((button) => {
+                button.dispatchEvent(
+                  new MouseEvent("click", { bubbles: true }),
+                );
+              });
+            const expectedSelection = {
+              value: "A💡BC!",
+              start: 0,
+              end: 6,
+              direction: "backward",
+              focused: true,
+            };
+            let actualSelection: typeof expectedSelection;
+            const deadline = Date.now() + 5_000;
+            do {
+              actualSelection = await selectionProbe.evaluate((node) => {
+                const input = node as HTMLTextAreaElement;
+                return {
+                  value: input.value,
+                  start: input.selectionStart,
+                  end: input.selectionEnd,
+                  direction: input.selectionDirection,
+                  focused: document.activeElement === input,
+                };
+              });
+              if (
+                JSON.stringify(actualSelection) ===
+                  JSON.stringify(expectedSelection)
+              ) break;
+              await page.waitForTimeout(20);
+            } while (Date.now() < deadline);
+            assertEquals(actualSelection, expectedSelection);
           }
 
           // Add "buy milk".

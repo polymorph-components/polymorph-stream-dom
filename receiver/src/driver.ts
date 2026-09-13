@@ -169,6 +169,26 @@ export function createDriver(opts: DriverOptions): Driver {
   let disposed = false;
   const onError = opts.onError ?? (() => {});
   const gate = new DispatchGate(onError);
+  const composing = new WeakSet<EventTarget>();
+  const compositionStart = (event: Event) => {
+    if (event.target) composing.add(event.target);
+  };
+  const compositionEnd = (event: Event) => {
+    if (event.target) composing.delete(event.target);
+  };
+  opts.root.addEventListener("compositionstart", compositionStart, true);
+  opts.root.addEventListener("compositionend", compositionEnd, true);
+  const selectionChange = (event: Event) => {
+    if (event.target !== opts.root.ownerDocument) return;
+    const active = opts.root.ownerDocument.activeElement;
+    if (!active || !opts.root.contains(active)) return;
+    dispatchDelegated("selectionchange", event, active);
+  };
+  opts.root.ownerDocument.addEventListener(
+    "selectionchange",
+    selectionChange,
+    true,
+  );
 
   const receiver: Receiver = opts.receiver === "remote"
     ? createRemoteReceiver(opts.root, opts.resolveAsset)
@@ -306,20 +326,44 @@ export function createDriver(opts: DriverOptions): Driver {
     if (listener.preventDefault) ev.preventDefault();
     if (listener.stopPropagation) ev.stopPropagation();
     if (disposed) return;
-    const payload = encodePayload(name, ev);
+    const eventTarget = ev.target;
+    const payload = encodePayload(
+      name,
+      ev,
+      (ev as InputEvent).isComposing === true ||
+        (eventTarget !== null && composing.has(eventTarget)),
+      eventTarget,
+    );
     gate.dispatch(() => opts.handleEvent(target, nameRef, payload, ev));
   }
 
-  function dispatchDelegated(name: string, ev: Event): void {
+  function dispatchDelegated(name: string, ev: Event, from?: Node): void {
     const nameRef = receiver.listeners.refFor(name);
     if (nameRef === undefined) return;
-    let node: Node | null = ev.target as Node | null;
+    let node: Node | null = from ?? ev.target as Node | null;
     while (node) {
       const id = nodeToId.get(node);
       if (id !== undefined) {
         const listener = receiver.listeners.listenerFor(id, nameRef);
         if (listener) {
-          fire({ kind: "node", value: id }, nameRef, name, ev, listener);
+          if (from !== undefined) {
+            const payload = encodePayload(
+              name,
+              ev,
+              composing.has(from),
+              from,
+            );
+            gate.dispatch(() =>
+              opts.handleEvent(
+                { kind: "node", value: id },
+                nameRef,
+                payload,
+                ev,
+              )
+            );
+          } else {
+            fire({ kind: "node", value: id }, nameRef, name, ev, listener);
+          }
           return;
         }
       }
@@ -562,6 +606,13 @@ export function createDriver(opts: DriverOptions): Driver {
     if (disposed) return;
     disposed = true;
     gate.dispose();
+    opts.root.removeEventListener("compositionstart", compositionStart, true);
+    opts.root.removeEventListener("compositionend", compositionEnd, true);
+    opts.root.ownerDocument.removeEventListener(
+      "selectionchange",
+      selectionChange,
+      true,
+    );
     if (opts.defaultPreventDefault) {
       opts.root.removeEventListener("submit", defaultSubmitHandler, {
         capture: true,

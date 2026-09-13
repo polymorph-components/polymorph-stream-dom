@@ -91,6 +91,7 @@ class RecordingSink implements FrameSink {
   setProperty(id: number, name: number, value: PropertyValue): void {
     this.calls.push({ op: "setProperty", id, name, value });
   }
+  setTextControlState(): void {}
   addListener(listener: Listener): void {
     this.calls.push({ op: "addListener", listener });
   }

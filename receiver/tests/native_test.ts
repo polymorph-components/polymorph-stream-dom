@@ -352,6 +352,62 @@ Deno.test("NativeDomReceiver: set-attribute / set-property require an element", 
   );
 });
 
+Deno.test("NativeDomReceiver: text-control state ignores invalid ranges before changing value", () => {
+  const { recv, root } = fixture();
+  recv.internString(1, "textarea");
+  recv.createElement(10, 1, undefined);
+  recv.insertBefore(0, 10, undefined);
+  recv.commit();
+  const textarea = root.querySelector("textarea") as HTMLTextAreaElement;
+  textarea.value = "keep";
+
+  recv.setTextControlState(10, {
+    value: "new",
+    selectionStart: 0,
+    selectionEnd: 4,
+    direction: "forward",
+  });
+  assertEquals(textarea.value, "keep");
+});
+
+Deno.test("NativeDomReceiver: input type property controls text-state eligibility", () => {
+  const { recv, root } = fixture();
+  recv.internString(1, "input");
+  recv.internString(2, "type");
+  recv.createElement(10, 1, undefined);
+  recv.setAttribute(10, 2, undefined, { kind: "text", value: "number" });
+  recv.setProperty(10, 2, { kind: "text", value: "text" });
+  recv.insertBefore(0, 10, undefined);
+  recv.commit();
+
+  const input = root.querySelector("input") as HTMLInputElement;
+  Object.defineProperty(input, "type", {
+    value: "number",
+    writable: true,
+    configurable: true,
+  });
+  input.setSelectionRange = function (start, end, direction) {
+    Object.defineProperties(this, {
+      selectionStart: { value: start, writable: true, configurable: true },
+      selectionEnd: { value: end, writable: true, configurable: true },
+      selectionDirection: {
+        value: direction,
+        writable: true,
+        configurable: true,
+      },
+    });
+  };
+  recv.setProperty(10, 2, { kind: "text", value: "text" });
+  recv.setTextControlState(10, {
+    value: "supported",
+    selectionStart: 2,
+    selectionEnd: 4,
+    direction: "forward",
+  });
+  assertEquals(input.value, "supported");
+  assertEquals([input.selectionStart, input.selectionEnd], [2, 4]);
+});
+
 // -- 4. interned refs must resolve ----------------------------------------
 
 Deno.test("NativeDomReceiver: an unresolved string ref throws", () => {

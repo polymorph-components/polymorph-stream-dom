@@ -11,9 +11,9 @@
 //! with only the families this spike's demo needs filled in.
 //!
 //! Filled in: `mouse` (click, dblclick and kin), `keyboard`, `form`, and
-//! `focus` — the last of which carries no data at all, by design
-//! (proto/stream-dom-events.proto's file header: "No case set is the empty
-//! payload — focus, selection, toggle, ..."). Every other family converts to
+//! `focus` — the last of which carries no family data. Text-control value and
+//! selection are optional context shared by form and selection events. Every
+//! other family converts to
 //! [`Empty`], the neutral value a renderer returns when the platform does not
 //! supply the information: those events still *dispatch*, their handlers just
 //! see zeroed data. Deliberate scope, not an oversight — the other ~1000
@@ -43,6 +43,52 @@ use dioxus_html::{
     VisibleData, WheelData,
 };
 use stream_dom_guest::proto;
+
+/// Create the opaque Dioxus attribute value consumed by stream-dom's atomic
+/// text-control mutation. Use as `"text_control_state": text_control_state(state)`.
+pub fn text_control_state(state: TextControlState) -> dioxus_core::AttributeValue {
+    dioxus_core::AttributeValue::any_value(state)
+}
+
+/// Direction of a textarea or text-like input selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextControlSelectionDirection {
+    None,
+    Forward,
+    Backward,
+}
+
+/// Browser text-control state captured with an event. Selection offsets are
+/// UTF-16 code units, matching `selectionStart` and `selectionEnd`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextControlState {
+    pub value: String,
+    pub selection_start: u32,
+    pub selection_end: u32,
+    pub direction: TextControlSelectionDirection,
+    pub is_composing: bool,
+}
+
+impl From<&proto::TextControlData> for TextControlState {
+    fn from(value: &proto::TextControlData) -> Self {
+        Self {
+            value: value.value.clone(),
+            selection_start: value.selection_start,
+            selection_end: value.selection_end,
+            direction: match proto::SelectionDirection::try_from(value.direction) {
+                Ok(proto::SelectionDirection::Forward) => TextControlSelectionDirection::Forward,
+                Ok(proto::SelectionDirection::Backward) => TextControlSelectionDirection::Backward,
+                _ => TextControlSelectionDirection::None,
+            },
+            is_composing: value.is_composing,
+        }
+    }
+}
+
+/// Access to optional text-control context carried beside an event family.
+pub trait TextControlDataExt {
+    fn text_control(&self) -> Option<&TextControlState>;
+}
 
 /// The platform event boxed into dioxus's [`PlatformEventData`]: one
 /// dispatch's decoded payload, converted lazily by [`StreamEventConverter`].
@@ -185,7 +231,10 @@ impl HasKeyboardData for Keyboard {
     }
 }
 
-struct Form(proto::FormData);
+struct Form {
+    form: proto::FormData,
+    text_control: Option<TextControlState>,
+}
 
 impl HasFileData for Form {
     fn files(&self) -> Vec<FileData> {
@@ -210,9 +259,9 @@ impl HasFormData for Form {
         // attribute-vs-property table follows. A checkable control's literal
         // `value` attribute is unreachable through this trait either way,
         // because dioxus-web discards it too.
-        match self.0.checked {
+        match self.form.checked {
             Some(checked) => checked.to_string(),
-            None => self.0.value.clone(),
+            None => self.form.value.clone(),
         }
     }
     fn valid(&self) -> bool {
@@ -221,7 +270,7 @@ impl HasFormData for Form {
         true
     }
     fn values(&self) -> Vec<(String, FormValue)> {
-        self.0
+        self.form
             .fields
             .iter()
             .map(|f| (f.name.clone(), FormValue::Text(f.value.clone())))
@@ -229,6 +278,47 @@ impl HasFormData for Form {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl TextControlDataExt for FormData {
+    fn text_control(&self) -> Option<&TextControlState> {
+        self.downcast::<Form>()?.text_control.as_ref()
+    }
+}
+
+struct Selection(Option<TextControlState>);
+
+impl HasSelectionData for Selection {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl TextControlDataExt for SelectionData {
+    fn text_control(&self) -> Option<&TextControlState> {
+        self.downcast::<Selection>()?.0.as_ref()
+    }
+}
+
+struct Composition {
+    data: String,
+    text_control: Option<TextControlState>,
+}
+
+impl HasCompositionData for Composition {
+    fn data(&self) -> String {
+        self.data.clone()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl TextControlDataExt for CompositionData {
+    fn text_control(&self) -> Option<&TextControlState> {
+        self.downcast::<Composition>()?.text_control.as_ref()
     }
 }
 
@@ -283,15 +373,6 @@ impl HasTransitionData for Empty {
     }
     fn elapsed_time(&self) -> f32 {
         0.0
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl HasCompositionData for Empty {
-    fn data(&self) -> String {
-        String::new()
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -605,7 +686,13 @@ impl HtmlEventConverter for StreamEventConverter {
             Some(Some(proto::event_payload::Family::Form(f))) => f.clone(),
             _ => proto::FormData::default(),
         };
-        FormData::new(Form(f))
+        let text_control = payload(event)
+            .and_then(|p| p.payload.text_control.as_ref())
+            .map(Into::into);
+        FormData::new(Form {
+            form: f,
+            text_control,
+        })
     }
 
     fn convert_focus_data(&self, _: &PlatformEventData) -> FocusData {
@@ -651,8 +738,19 @@ impl HtmlEventConverter for StreamEventConverter {
         ClipboardData::new(Empty)
     }
 
-    fn convert_composition_data(&self, _: &PlatformEventData) -> CompositionData {
-        CompositionData::new(Empty)
+    fn convert_composition_data(&self, event: &PlatformEventData) -> CompositionData {
+        let (data, text_control) = match payload(event) {
+            Some(p) => {
+                let data = match &p.payload.family {
+                    Some(proto::event_payload::Family::Composition(data)) => data.data.clone(),
+                    _ => String::new(),
+                };
+                let text_control = p.payload.text_control.as_ref().map(Into::into);
+                (data, text_control)
+            }
+            None => (String::new(), None),
+        };
+        CompositionData::new(Composition { data, text_control })
     }
 
     fn convert_image_data(&self, _: &PlatformEventData) -> ImageData {
@@ -678,8 +776,12 @@ impl HtmlEventConverter for StreamEventConverter {
         ScrollData::new(Empty)
     }
 
-    fn convert_selection_data(&self, _: &PlatformEventData) -> SelectionData {
-        SelectionData::new(Empty)
+    fn convert_selection_data(&self, event: &PlatformEventData) -> SelectionData {
+        SelectionData::new(Selection(
+            payload(event)
+                .and_then(|p| p.payload.text_control.as_ref())
+                .map(Into::into),
+        ))
     }
 
     fn convert_toggle_data(&self, _: &PlatformEventData) -> ToggleData {

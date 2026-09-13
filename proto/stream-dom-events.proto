@@ -5,7 +5,7 @@
 // records the reasons). The receiver chooses the family by event name and
 // snapshots the fields; a family carries what handlers commonly read and
 // nothing that is only reachable through a live object. No case set is the
-// empty payload — focus, selection, toggle, clipboard, media, cancel,
+// empty payload — focus, toggle, clipboard, media, cancel,
 // `load` / `error` on media elements, and synthetic `mounted`: the event
 // name, which the guest gets alongside the bytes, already says everything
 // those carry.
@@ -162,6 +162,26 @@ message FormData {
   repeated FormField fields = 3;
 }
 
+// A textarea or text-like input's live value and selection. This is optional
+// top-level event context rather than a family: input events still need their
+// FormData, while select/selectionchange events have no other payload.
+enum SelectionDirection {
+  SELECTION_DIRECTION_NONE = 0;
+  SELECTION_DIRECTION_FORWARD = 1;
+  SELECTION_DIRECTION_BACKWARD = 2;
+}
+
+message TextControlData {
+  string value = 1;
+  // DOM selectionStart/selectionEnd: UTF-16 code-unit offsets.
+  uint32 selection_start = 2;
+  uint32 selection_end = 3;
+  SelectionDirection direction = 4;
+  // True during an IME composition. A producer can defer controlled value
+  // updates until a later event reports false.
+  bool is_composing = 5;
+}
+
 // The target's scroll state at the time of a `scroll` event. The offsets
 // are fractional; the sizes are integer in the DOM.
 message ScrollData {
@@ -316,4 +336,5 @@ message EventPayload {
     VisibleData visible = 13;
     NavigationData navigation = 14;
   }
+  optional TextControlData text_control = 15;
 }

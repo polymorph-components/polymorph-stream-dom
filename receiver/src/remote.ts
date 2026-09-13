@@ -31,6 +31,7 @@ import type {
   Listener,
   PropertyValue,
   TemplateNode,
+  TextControlState,
 } from "./frames.ts";
 import type { Receiver } from "./receiver.ts";
 import { ListenerRegistry } from "./receiver.ts";
@@ -59,6 +60,51 @@ interface ShadowNode {
   children: ShadowNode[];
   attached: boolean;
   ids: number[];
+  textControlState?: TextControlState;
+}
+
+type PendingRecord =
+  | { kind: "remote"; record: RemoteMutationRecord; applied?: () => void }
+  | { kind: "text-control"; node: ShadowNode; state: TextControlState };
+
+const SELECTION_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "tel",
+  "url",
+  "password",
+]);
+const KNOWN_INPUT_TYPES = new Set([
+  "button",
+  "checkbox",
+  "color",
+  "date",
+  "datetime-local",
+  "email",
+  "file",
+  "hidden",
+  "image",
+  "month",
+  "number",
+  "password",
+  "radio",
+  "range",
+  "reset",
+  "search",
+  "submit",
+  "tel",
+  "text",
+  "time",
+  "url",
+  "week",
+]);
+
+function effectiveInputType(node: ShadowNode): string {
+  const raw = node.props.has("type")
+    ? node.props.get("type")
+    : node.attrs.get("type");
+  const type = String(raw ?? "text").toLowerCase();
+  return KNOWN_INPUT_TYPES.has(type) ? type : "text";
 }
 
 /** A registered template: the flat arena plus its declared root indices,
@@ -100,6 +146,7 @@ function rootShadow(): ShadowNode {
     children: [],
     attached: true,
     ids: [],
+    textControlState: undefined,
   };
 }
 
@@ -146,7 +193,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
   #templates = new Map<number, Template>();
   #ridCounter = 0;
   #resolveAsset: ((handle: Uint8Array) => string) | undefined;
-  #records: RemoteMutationRecord[] = [];
+  #pending: PendingRecord[] = [];
   readonly listeners: ListenerRegistry = new ListenerRegistry();
   onCommit: (() => void) | null = null;
 
@@ -250,6 +297,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       children: [],
       attached: false,
       ids: [],
+      textControlState: undefined,
     });
   }
 
@@ -266,6 +314,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       children: [],
       attached: false,
       ids: [],
+      textControlState: undefined,
     });
   }
 
@@ -282,6 +331,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       children: [],
       attached: false,
       ids: [],
+      textControlState: undefined,
     });
   }
 
@@ -306,6 +356,19 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       properties,
       children: node.children.map((c) => this.#serialize(c)),
     };
+  }
+
+  #queueDetachedTextControlState(node: ShadowNode): void {
+    if (node.textControlState) {
+      this.#pending.push({
+        kind: "text-control",
+        node,
+        state: node.textControlState,
+      });
+    }
+    for (const child of node.children) {
+      this.#queueDetachedTextControlState(child);
+    }
   }
 
   /** Mark `node` and its whole shadow subtree attached (after an
@@ -412,11 +475,14 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
       // receiver, and mark the whole subtree detached so it re-serializes
       // in full if it is ever attached again.
       if (wasAttached && oldParent && oldIndexIfAttached !== -1) {
-        this.#records.push([
-          MUTATION_TYPE_REMOVE_CHILD,
-          oldParent.rid,
-          oldIndexIfAttached,
-        ]);
+        this.#pending.push({
+          kind: "remote",
+          record: [
+            MUTATION_TYPE_REMOVE_CHILD,
+            oldParent.rid,
+            oldIndexIfAttached,
+          ],
+        });
         this.#markDetached(node);
       }
       return;
@@ -425,20 +491,27 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     if (wasAttached) {
       // A move: INSERT_CHILD with an already-known id is exactly
       // DOMRemoteReceiver's move path (`attach` returns the existing node).
-      this.#records.push([
-        MUTATION_TYPE_INSERT_CHILD,
-        parent.rid,
-        { id: node.rid } as unknown as RemoteNodeSerialization,
-        recordIndex,
-      ]);
+      this.#pending.push({
+        kind: "remote",
+        record: [
+          MUTATION_TYPE_INSERT_CHILD,
+          parent.rid,
+          { id: node.rid } as unknown as RemoteNodeSerialization,
+          recordIndex,
+        ],
+      });
     } else {
       this.#markAttached(node);
-      this.#records.push([
-        MUTATION_TYPE_INSERT_CHILD,
-        parent.rid,
-        this.#serialize(node),
-        recordIndex,
-      ]);
+      this.#pending.push({
+        kind: "remote",
+        record: [
+          MUTATION_TYPE_INSERT_CHILD,
+          parent.rid,
+          this.#serialize(node),
+          recordIndex,
+        ],
+      });
+      this.#queueDetachedTextControlState(node);
     }
   }
 
@@ -524,7 +597,10 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     const parent = node.parent;
     if (parent && node.attached) {
       const index = parent.children.indexOf(node);
-      this.#records.push([MUTATION_TYPE_REMOVE_CHILD, parent.rid, index]);
+      this.#pending.push({
+        kind: "remote",
+        record: [MUTATION_TYPE_REMOVE_CHILD, parent.rid, index],
+      });
     }
     if (parent) parent.children.splice(parent.children.indexOf(node), 1);
     node.parent = null;
@@ -550,7 +626,10 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     const node = this.#resolve(id);
     node.text = text;
     if (node.attached) {
-      this.#records.push([MUTATION_TYPE_UPDATE_TEXT, node.rid, text]);
+      this.#pending.push({
+        kind: "remote",
+        record: [MUTATION_TYPE_UPDATE_TEXT, node.rid, text],
+      });
     }
   }
 
@@ -572,13 +651,16 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     if (text === undefined) node.attrs.delete(attrName);
     else node.attrs.set(attrName, text);
     if (node.attached) {
-      this.#records.push([
-        MUTATION_TYPE_UPDATE_PROPERTY,
-        node.rid,
-        attrName,
-        text ?? null,
-        UPDATE_PROPERTY_TYPE_ATTRIBUTE,
-      ]);
+      this.#pending.push({
+        kind: "remote",
+        record: [
+          MUTATION_TYPE_UPDATE_PROPERTY,
+          node.rid,
+          attrName,
+          text ?? null,
+          UPDATE_PROPERTY_TYPE_ATTRIBUTE,
+        ],
+      });
     }
   }
 
@@ -592,14 +674,50 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
     // yields the string "undefined"; booleans coerce `null` to false.
     if (value.kind === "none") node.props.delete(propName);
     else node.props.set(propName, value.value);
+    if (!node.attached && (propName === "value" || propName === "type")) {
+      node.textControlState = undefined;
+    }
     if (node.attached) {
-      this.#records.push([
-        MUTATION_TYPE_UPDATE_PROPERTY,
-        node.rid,
-        propName,
-        value.kind === "none" ? null : value.value,
-        UPDATE_PROPERTY_TYPE_PROPERTY,
-      ]);
+      this.#pending.push({
+        kind: "remote",
+        record: [
+          MUTATION_TYPE_UPDATE_PROPERTY,
+          node.rid,
+          propName,
+          value.kind === "none" ? null : value.value,
+          UPDATE_PROPERTY_TYPE_PROPERTY,
+        ],
+        applied: propName === "value" || propName === "type"
+          ? () => {
+            // setTextControlState may have updated the retained value while
+            // this property operation was waiting. Mirror the operation only
+            // after its remote mutation applies so shadow serialization keeps
+            // the same order as the DOM.
+            if (value.kind === "none") node.props.delete(propName);
+            else node.props.set(propName, value.value);
+            node.textControlState = undefined;
+          }
+          : undefined,
+      });
+    }
+  }
+
+  setTextControlState(id: number, state: TextControlState): void {
+    const shadow = this.#resolve(id);
+    if (
+      state.selectionStart > state.selectionEnd ||
+      state.selectionEnd > state.value.length
+    ) return;
+    if (
+      !shadow.attached && shadow.tag !== "textarea" &&
+      !(shadow.tag === "input" &&
+        SELECTION_INPUT_TYPES.has(effectiveInputType(shadow)))
+    ) return;
+    if (shadow.attached) {
+      this.#pending.push({ kind: "text-control", node: shadow, state });
+    } else {
+      shadow.props.set("value", state.value);
+      shadow.textControlState = state;
     }
   }
 
@@ -662,6 +780,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
           children: [],
           attached: false,
           ids: [],
+          textControlState: undefined,
         };
       }
       if (n.kind === "dynamic") {
@@ -680,6 +799,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
           children: [],
           attached: false,
           ids: [],
+          textControlState: undefined,
         };
       }
       // Strings come from the registration-time table, never re-resolved
@@ -697,6 +817,7 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
         children: [],
         attached: false,
         ids: [],
+        textControlState: undefined,
       };
       for (const childIdx of n.element.children) {
         const child = clone(childIdx);
@@ -729,10 +850,66 @@ export class RemoteDomTranscoder implements Receiver, FrameSink {
   // -- commit ---------------------------------------------------------------
 
   commit(): void {
-    if (this.#records.length > 0) {
-      this.#connection.mutate(this.#records);
-      this.#records = [];
+    const applyTextControlState = (
+      shadow: ShadowNode,
+      state: TextControlState,
+    ) => {
+      let node: HTMLInputElement | HTMLTextAreaElement | undefined;
+      try {
+        node = this.#connection.call(shadow.rid, NODE_CALL) as
+          | HTMLInputElement
+          | HTMLTextAreaElement;
+      } catch {
+        return;
+      }
+      if (
+        !node ||
+        (node.tagName !== "TEXTAREA" &&
+          !(node.tagName === "INPUT" &&
+            SELECTION_INPUT_TYPES.has((node as HTMLInputElement).type)))
+      ) {
+        return;
+      }
+      if (
+        state.selectionStart > state.selectionEnd ||
+        state.selectionEnd > state.value.length
+      ) {
+        return;
+      }
+      const previous = node.value;
+      try {
+        node.value = state.value;
+        node.setSelectionRange(
+          state.selectionStart,
+          state.selectionEnd,
+          state.direction,
+        );
+        shadow.props.set("value", state.value);
+        shadow.textControlState = state;
+      } catch {
+        node.value = previous;
+      }
+    };
+    let records: RemoteMutationRecord[] = [];
+    const flushRecords = () => {
+      if (records.length === 0) return;
+      this.#connection.mutate(records);
+      records = [];
+    };
+    for (const pending of this.#pending) {
+      if (pending.kind === "remote") {
+        records.push(pending.record);
+        if (pending.applied) {
+          flushRecords();
+          pending.applied();
+        }
+      } else {
+        flushRecords();
+        applyTextControlState(pending.node, pending.state);
+      }
     }
+    flushRecords();
+    this.#pending = [];
     this.onCommit?.();
   }
 }

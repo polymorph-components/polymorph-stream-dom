@@ -12,6 +12,7 @@ import type {
   Listener,
   PropertyValue,
   TemplateNode,
+  TextControlState,
 } from "./frames.ts";
 
 export interface Policy {
@@ -51,6 +52,11 @@ export type PolicyOp =
     tag: string | undefined;
     name: string;
     value: PropertyValue;
+  }
+  | {
+    op: "setTextControlState";
+    tag: string | undefined;
+    state: TextControlState;
   }
   | {
     op: "addListener";
@@ -203,6 +209,16 @@ export class PolicySink implements FrameSink {
       value,
     });
     this.#inner.setProperty(id, name, value);
+  }
+
+  setTextControlState(id: number, state: TextControlState): void {
+    const opIndex = this.#next();
+    this.#check(opIndex, {
+      op: "setTextControlState",
+      tag: this.#tags.get(id),
+      state,
+    });
+    this.#inner.setTextControlState(id, state);
   }
 
   addListener(listener: Listener): void {

@@ -33,6 +33,7 @@ import type {
   Listener,
   PropertyValue,
   TemplateNode,
+  TextControlState,
 } from "./frames.ts";
 import type { Receiver } from "./receiver.ts";
 import { ListenerRegistry } from "./receiver.ts";
@@ -409,6 +410,34 @@ export class NativeDomReceiver implements Receiver, FrameSink {
     // property assignment itself, not a remote-dom behavior, so it
     // applies here unchanged.)
     el[propName] = value.kind === "none" ? null : value.value;
+  }
+
+  setTextControlState(id: number, state: TextControlState): void {
+    const el = this.#element("set-text-control-state", id) as
+      | HTMLInputElement
+      | HTMLTextAreaElement;
+    if (
+      el.tagName !== "TEXTAREA" &&
+      !(el.tagName === "INPUT" &&
+        ["text", "search", "tel", "url", "password"].includes(
+          (el as HTMLInputElement).type,
+        ))
+    ) return;
+    if (
+      state.selectionStart > state.selectionEnd ||
+      state.selectionEnd > state.value.length
+    ) return;
+    const previous = el.value;
+    try {
+      el.value = state.value;
+      el.setSelectionRange(
+        state.selectionStart,
+        state.selectionEnd,
+        state.direction,
+      );
+    } catch {
+      el.value = previous;
+    }
   }
 
   // -- listeners ------------------------------------------------------------
