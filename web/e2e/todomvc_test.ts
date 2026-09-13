@@ -93,7 +93,10 @@ Deno.test("TodoMVC demos", async (t) => {
           page.on("pageerror", (err) => pageErrors.push(String(err)));
 
           page.setDefaultTimeout(30_000);
-          await page.goto(`${url}/${demo.page}?receiver=${receiver}`);
+          const plain = demo.name === "dioxus-todomvc"
+            ? "&jspi=false&transport=chunked"
+            : "";
+          await page.goto(`${url}/${demo.page}?receiver=${receiver}${plain}`);
           await page.evaluate(() => globalThis.__streamDom!.ready);
           assert(
             await page.evaluate(() => globalThis.__streamDom!.mounted),
@@ -102,6 +105,43 @@ Deno.test("TodoMVC demos", async (t) => {
 
           const newTodo = page.locator(".new-todo");
           await newTodo.waitFor({ state: "visible" });
+
+          if (demo.name === "dioxus-todomvc") {
+            // Eight real component export entries (input/keydown pairs) issued
+            // from one browser task. Four distinguishable results prove FIFO
+            // delivery without relying on an intermediate DOM observation.
+            await newTodo.evaluate((node) => {
+              const input = node as HTMLInputElement;
+              for (
+                const text of ["queued-a", "queued-b", "queued-c", "queued-d"]
+              ) {
+                input.value = text;
+                input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+                input.dispatchEvent(
+                  new KeyboardEvent("keydown", {
+                    bubbles: true,
+                    key: "Enter",
+                    code: "Enter",
+                  }),
+                );
+              }
+            });
+            const queuedLabels = page.locator(".todo-list li label");
+            await assertVisibleCount(queuedLabels, 4);
+            assertEquals(await queuedLabels.allTextContents(), [
+              "queued-a",
+              "queued-b",
+              "queued-c",
+              "queued-d",
+            ]);
+            for (const _ of [0, 1, 2, 3]) {
+              await page.locator(".todo-list li").first().hover();
+              await page.locator(".todo-list li .destroy").first().click();
+            }
+            await assertVisibleCount(page.locator(".todo-list li"), 0);
+            assertEquals(consoleErrors, [], "queued export console errors");
+            assertEquals(pageErrors, [], "queued export page errors");
+          }
 
           // Add "buy milk".
           await newTodo.fill("buy milk");

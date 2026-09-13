@@ -434,8 +434,12 @@ portable to that tier, and the protocol does not pretend otherwise.
 Reentrancy: `set-focus` fires `focusin`/`focusout` synchronously, which
 would dispatch events back into a guest still on the stack. The receiver
 brackets such imports with a dispatch gate and drains queued dispatches
-after the guest's turn unwinds. (polyengine-dioxus's `dispatch.ts` is the
-worked example.)
+after the guest's turn unwinds. The guard covers synchronous guest entry and
+DOM-application extents, not the returned export Promise's whole lifetime: in
+the plain callback runtime the activation has parked when the call returns,
+and JSPI supplies its own entry scheduling. Later events may therefore enter
+while an earlier Promise remains pending. (polyengine-dioxus's `dispatch.ts`
+is the worked example.)
 
 ### Refs are ids; third-party DOM libraries need islands
 

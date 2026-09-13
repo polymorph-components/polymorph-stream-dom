@@ -39,6 +39,9 @@ export interface MountOptions {
    * polyengine-dioxus host.ts:540-565) — a benchmark harness comparing
    * the two transports' overhead wants both available behind one flag. */
   transport?: "direct" | "chunked";
+  /** Override polyengine's suspension-mode auto-detection. Test/demo wiring
+   * uses `false` to exercise the plain callback runtime explicitly. */
+  jspi?: boolean;
   /** Recording tap: called with a COPY of each chunk of stream bytes
    * consumed, in order, from the very first byte. A copy in both
    * transports — `readDirect`'s view aliases guest memory and is invalid
@@ -134,7 +137,7 @@ export async function mount(opts: MountOptions): Promise<Mounted> {
     "polymorph:stream-dom/events@0.1.0": { DomEvent },
   };
 
-  const instance = await instantiate(opts.source, imports);
+  const instance = await instantiate(opts.source, imports, { jspi: opts.jspi });
   exports_.handleEvent = instance.exports.handleEvent as (
     ...a: unknown[]
   ) => unknown;
