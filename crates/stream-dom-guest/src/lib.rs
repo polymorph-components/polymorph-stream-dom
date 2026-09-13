@@ -215,6 +215,25 @@ impl Batch {
         }));
     }
 
+    pub fn set_text_control_state(
+        &mut self,
+        id: NodeId,
+        value: String,
+        selection_start: u32,
+        selection_end: u32,
+        direction: proto::SelectionDirection,
+    ) {
+        self.push(proto::frame::Op::SetTextControlState(
+            proto::SetTextControlState {
+                id,
+                value,
+                selection_start,
+                selection_end,
+                direction: direction as i32,
+            },
+        ));
+    }
+
     pub fn add_listener(&mut self, l: proto::Listener) {
         self.push(proto::frame::Op::AddListener(proto::AddListener {
             listener: Some(l),

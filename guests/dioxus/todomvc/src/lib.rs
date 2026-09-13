@@ -14,6 +14,9 @@
 
 use dioxus::prelude::*;
 use std::collections::HashMap;
+use stream_dom_dioxus::{
+    text_control_state, TextControlDataExt, TextControlSelectionDirection, TextControlState,
+};
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum FilterState {
@@ -110,6 +113,59 @@ fn app() -> Element {
                 "Part of "
                 a { href: "http://todomvc.com", "TodoMVC" }
             }
+        }
+        SelectionProbe {}
+    }
+}
+
+#[component]
+fn SelectionProbe() -> Element {
+    let value = use_signal(|| "A💡BC".to_string());
+    let mut observed = use_signal(|| None::<TextControlState>);
+    let mut restore_epoch = use_signal(|| 0_u32);
+    let mut restored = use_signal(|| TextControlState {
+        value: value(),
+        selection_start: 0,
+        selection_end: 0,
+        direction: TextControlSelectionDirection::None,
+        is_composing: false,
+    });
+    let current = restored();
+    let mut capture = move |state: Option<&TextControlState>| {
+        if let Some(state) = state {
+            observed.set(Some(state.clone()));
+        }
+    };
+    rsx! {
+        section { class: "selection-probe",
+            textarea {
+                aria_label: "Selection probe",
+                "text_control_state": text_control_state(current),
+                onselect: move |evt: SelectionEvent| capture(evt.data().text_control()),
+                onselectionchange: move |evt: SelectionEvent| capture(evt.data().text_control()),
+            }
+            button {
+                r#type: "button",
+                onclick: move |_| {
+                    if let Some(state) = observed() {
+                        restored.set(TextControlState {
+                            value: format!("{}!", state.value),
+                            selection_start: 0,
+                            selection_end: 6,
+                            direction: TextControlSelectionDirection::Backward,
+                            is_composing: state.is_composing,
+                        });
+                        restore_epoch += 1;
+                    }
+                },
+                "Restore selection"
+            }
+            output { aria_label: "Observed selection",
+                if let Some(state) = observed() {
+                    "{state.selection_start}:{state.selection_end}"
+                }
+            }
+            span { hidden: true, "{restore_epoch}" }
         }
     }
 }

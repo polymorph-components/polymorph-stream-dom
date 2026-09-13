@@ -389,6 +389,11 @@ const NODE_EVENTS = new Set([
   "focusout",
   // form
   "input",
+  "select",
+  "selectionchange",
+  "compositionstart",
+  "compositionupdate",
+  "compositionend",
   "change",
   "submit",
   "reset",
@@ -651,6 +656,11 @@ export function desktopPolicy(opts: DesktopPolicyOptions = {}): Policy {
         }
         return undefined;
       }
+      case "setTextControlState":
+        if (op.tag !== "textarea" && op.tag !== "input") {
+          return "text-control state is allowed only on input and textarea";
+        }
+        return checkStringLen("text-control value", op.state.value);
 
       case "addListener": {
         listeners++;

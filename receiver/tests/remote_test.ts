@@ -13,11 +13,57 @@ import type { TemplateNode } from "../src/frames.ts";
 
 class FakeConnection implements RemoteConnection {
   batches: RemoteMutationRecord[][] = [];
+  trace: string[] = [];
+  nodes = new Map<string, {
+    tagName: string;
+    type: string;
+    value: unknown;
+    selectionStart: number;
+    selectionEnd: number;
+    selectionDirection: string;
+    setSelectionRange(start: number, end: number, direction: string): void;
+  }>();
   mutate(records: readonly RemoteMutationRecord[]): void {
     this.batches.push([...records]);
+    for (const record of records) {
+      if (record[0] === MUTATION_TYPE_INSERT_CHILD) {
+        const child = record[2] as unknown as {
+          id: string;
+          element?: string;
+          properties?: Record<string, unknown>;
+        };
+        if (child.element === "textarea" || child.element === "input") {
+          const trace = this.trace;
+          const control = {
+            tagName: child.element.toUpperCase(),
+            type: String(child.properties?.type ?? "text"),
+            value: child.properties?.value ?? "",
+            selectionStart: 0,
+            selectionEnd: 0,
+            selectionDirection: "none",
+            setSelectionRange(start: number, end: number, direction: string) {
+              trace.push(`text-control:${String(this.value)}`);
+              this.selectionStart = start;
+              this.selectionEnd = end;
+              this.selectionDirection = direction;
+            },
+          };
+          this.nodes.set(child.id, control);
+        }
+      } else if (record[0] === MUTATION_TYPE_UPDATE_PROPERTY) {
+        const node = this.nodes.get(record[1] as string);
+        if (node) {
+          if (record[2] === "type") node.type = String(record[3]);
+          else node.value = record[3];
+        }
+        this.trace.push(`property:${String(record[3])}`);
+      }
+    }
   }
-  call(): unknown {
-    throw new Error("not used by these tests");
+  call(id: string): unknown {
+    const node = this.nodes.get(id);
+    if (!node) throw new Error("node unavailable");
+    return node;
   }
 }
 
@@ -80,6 +126,173 @@ Deno.test("attribute update on an attached node", () => {
   t.setAttribute(10, 2, undefined, undefined); // remove
   t.commit();
   assertEquals(conn.batches[1][0][3], null);
+});
+
+Deno.test("text-control state keeps its order relative to property writes", () => {
+  const state = {
+    value: "atomic",
+    selectionStart: 1,
+    selectionEnd: 3,
+    direction: "backward" as const,
+  };
+  for (const stateFirst of [true, false]) {
+    const { t, conn } = transcoder();
+    t.internString(1, "textarea");
+    t.internString(2, "value");
+    t.createElement(10, 1, undefined);
+    t.insertBefore(0, 10, undefined);
+    t.commit();
+    conn.trace.length = 0;
+
+    if (stateFirst) {
+      t.setTextControlState(10, state);
+      t.setProperty(10, 2, { kind: "text", value: "last" });
+    } else {
+      t.setProperty(10, 2, { kind: "text", value: "first" });
+      t.setTextControlState(10, state);
+    }
+    t.commit();
+
+    assertEquals(
+      conn.trace,
+      stateFirst
+        ? ["text-control:atomic", "property:last"]
+        : ["property:first", "text-control:atomic"],
+    );
+    assertEquals(
+      conn.nodes.get(t.ridFor(10)!)?.value,
+      stateFirst ? "last" : "atomic",
+    );
+
+    t.internString(3, "div");
+    t.createElement(11, 3, undefined);
+    t.insertBefore(11, 10, undefined);
+    t.commit();
+    t.insertBefore(0, 11, undefined);
+    t.commit();
+
+    const reattached = conn.batches.at(-1)![0][2] as unknown as {
+      children: Array<{ properties: Record<string, unknown> }>;
+    };
+    assertEquals(
+      reattached.children[0].properties.value,
+      stateFirst ? "last" : "atomic",
+    );
+  }
+});
+
+Deno.test("a type property after text-control state is retained on reattach", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "input");
+  t.internString(2, "type");
+  t.internString(3, "div");
+  t.createElement(10, 1, undefined);
+  t.insertBefore(0, 10, undefined);
+  t.commit();
+
+  t.setTextControlState(10, {
+    value: "atomic",
+    selectionStart: 1,
+    selectionEnd: 3,
+    direction: "backward",
+  });
+  t.setProperty(10, 2, { kind: "text", value: "search" });
+  t.commit();
+  assertEquals(conn.nodes.get(t.ridFor(10)!)?.type, "search");
+
+  t.createElement(11, 3, undefined);
+  t.insertBefore(11, 10, undefined);
+  t.commit();
+  t.insertBefore(0, 11, undefined);
+  t.commit();
+
+  const reattached = conn.batches.at(-1)![0][2] as unknown as {
+    children: Array<{ properties: Record<string, unknown> }>;
+  };
+  assertEquals(reattached.children[0].properties, {
+    value: "atomic",
+    type: "search",
+  });
+});
+
+Deno.test("text-control state survives detached serialization until attachment", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "textarea");
+  t.createElement(10, 1, undefined);
+  t.setTextControlState(10, {
+    value: "A💡B",
+    selectionStart: 1,
+    selectionEnd: 3,
+    direction: "backward",
+  });
+  t.commit();
+  assertEquals(conn.batches.length, 0);
+
+  t.insertBefore(0, 10, undefined);
+  t.commit();
+  const node = conn.nodes.get(t.ridFor(10)!)!;
+  assertEquals(node.value, "A💡B");
+  assertEquals(node.selectionStart, 1);
+  assertEquals(node.selectionEnd, 3);
+  assertEquals(node.selectionDirection, "backward");
+});
+
+Deno.test("detached input honors a later type property before text-control state", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "input");
+  t.internString(2, "type");
+  t.createElement(10, 1, undefined);
+  t.setAttribute(10, 2, undefined, { kind: "text", value: "number" });
+  t.setProperty(10, 2, { kind: "text", value: "text" });
+  t.insertBefore(0, 10, undefined);
+  t.commit();
+
+  t.setTextControlState(10, {
+    value: "supported",
+    selectionStart: 2,
+    selectionEnd: 4,
+    direction: "forward",
+  });
+  t.commit();
+
+  const node = conn.nodes.get(t.ridFor(10)!)!;
+  assertEquals(node.type, "text");
+  assertEquals(node.value, "supported");
+  assertEquals([node.selectionStart, node.selectionEnd], [2, 4]);
+});
+
+Deno.test("rejected attached text state is not retained across detach and reattach", () => {
+  const { t, conn } = transcoder();
+  t.internString(1, "input");
+  t.internString(2, "type");
+  t.internString(3, "value");
+  t.internString(4, "div");
+  t.createElement(10, 1, undefined);
+  t.setProperty(10, 2, { kind: "text", value: "number" });
+  t.setProperty(10, 3, { kind: "text", value: "7" });
+  t.insertBefore(0, 10, undefined);
+  t.commit();
+
+  t.setTextControlState(10, {
+    value: "123",
+    selectionStart: 1,
+    selectionEnd: 1,
+    direction: "none",
+  });
+  t.commit();
+  const rid = t.ridFor(10)!;
+  assertEquals(conn.nodes.get(rid)?.value, "7");
+
+  t.createElement(11, 4, undefined);
+  t.insertBefore(11, 10, undefined);
+  t.commit();
+  t.insertBefore(0, 11, undefined);
+  t.commit();
+  assertEquals(conn.nodes.get(rid)?.value, "7");
+  const reattached = conn.batches.at(-1)![0][2] as unknown as {
+    children: Array<{ properties: Record<string, unknown> }>;
+  };
+  assertEquals(reattached.children[0].properties.value, "7");
 });
 
 Deno.test("move via insert-before on an already-attached node (backward move)", () => {

@@ -7,7 +7,7 @@
 // in both places, except that the observer payloads carry a `Rect` / `Size`
 // structurally equal to the `queries` records.
 //
-// PROTOCOL VERSION: 1
+// PROTOCOL VERSION: 2
 //
 // Stream layout: standard length-delimited messages — varint byte length,
 // then one Frame, repeated. No header. Additive change (a new oneof case,
@@ -31,6 +31,8 @@
 syntax = "proto3";
 
 package polymorph.stream_dom;
+
+import "stream-dom-events.proto";
 
 // One frame: at most one op, plus the batch-boundary flag.
 //
@@ -68,6 +70,7 @@ message Frame {
     RegisterTemplate register_template = 15;
     InsertAfter insert_after = 16;
     BindMarker bind_marker = 17;
+    SetTextControlState set_text_control_state = 18;
   }
 }
 
@@ -158,6 +161,17 @@ message SetProperty {
     double float = 5;
     bool boolean = 6;
   }
+}
+
+// Replace a textarea or text-like input's value and selection as one receiver
+// operation. Offsets are DOM UTF-16 code units. Unsupported controls or
+// invalid ranges make the operation a no-op.
+message SetTextControlState {
+  uint32 id = 1;
+  string value = 2;
+  uint32 selection_start = 3;
+  uint32 selection_end = 4;
+  SelectionDirection direction = 5;
 }
 
 // The two receiver-side singletons a producer can listen on without

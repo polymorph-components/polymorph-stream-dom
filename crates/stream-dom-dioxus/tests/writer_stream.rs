@@ -22,6 +22,7 @@ use dioxus_core::{ElementId, Runtime};
 use prost::Message;
 use stream_dom_dioxus::events::{StreamEventConverter, StreamEventData};
 use stream_dom_dioxus::writer::MutationWriter;
+use stream_dom_dioxus::{TextControlDataExt, TextControlSelectionDirection, TextControlState};
 use stream_dom_guest::proto;
 use stream_dom_guest::{Interner, NodeId, StrRef};
 
@@ -191,6 +192,7 @@ fn check_batch(bytes: &[u8], known: &mut Known) -> Vec<proto::Frame> {
                 known.node(s.id, "set-property");
                 known.slot(s.name, "set-property name");
             }
+            Op::SetTextControlState(s) => known.node(s.id, "set-text-control-state"),
             Op::AddListener(l) => {
                 let l = l.listener.as_ref().unwrap();
                 known.node(listener_node(l, "add-listener"), "add-listener");
@@ -245,6 +247,7 @@ fn click(
                     primary: true,
                     ..Default::default()
                 })),
+                text_control: None,
             }),
         ))),
         true,
@@ -252,6 +255,37 @@ fn click(
     runtime.handle_event("click", event.into_any(), element);
     dom.render_immediate(writer);
     writer.batch.finish()
+}
+
+#[test]
+fn text_control_context_is_available_from_form_and_selection_data() {
+    use dioxus_html::HtmlEventConverter;
+
+    let platform =
+        dioxus_html::PlatformEventData::new(Box::new(StreamEventData::new(proto::EventPayload {
+            family: Some(proto::event_payload::Family::Form(proto::FormData {
+                value: "A💡B".into(),
+                ..Default::default()
+            })),
+            text_control: Some(proto::TextControlData {
+                value: "A💡B".into(),
+                selection_start: 1,
+                selection_end: 3,
+                direction: proto::SelectionDirection::Backward as i32,
+                is_composing: true,
+            }),
+        })));
+    let converter = StreamEventConverter;
+
+    let form = converter.convert_form_data(&platform);
+    let selection = converter.convert_selection_data(&platform);
+    for state in [form.text_control(), selection.text_control()] {
+        let state = state.expect("text-control context");
+        assert_eq!(state.value, "A💡B");
+        assert_eq!((state.selection_start, state.selection_end), (1, 3));
+        assert_eq!(state.direction, TextControlSelectionDirection::Backward);
+        assert!(state.is_composing);
+    }
 }
 
 #[test]
@@ -473,6 +507,43 @@ fn attrs_app() -> Element {
         input { disabled: flag() }
         input { value: "{text}" }
     }
+}
+
+fn selection_attrs_app() -> Element {
+    let state = use_signal(|| TextControlState {
+        value: "A💡B".into(),
+        selection_start: 1,
+        selection_end: 3,
+        direction: TextControlSelectionDirection::Backward,
+        is_composing: false,
+    });
+    rsx! {
+        textarea {
+            "text_control_state": stream_dom_dioxus::text_control_state(state()),
+        }
+    }
+}
+
+#[test]
+fn text_control_state_is_one_atomic_mutation() {
+    let interner = Rc::new(RefCell::new(Interner::new()));
+    let mut writer = MutationWriter::new(interner.clone());
+    let mut dom = VirtualDom::new(selection_attrs_app);
+    dom.rebuild(&mut writer);
+    let bytes = writer.batch.finish().expect("mount produces a batch");
+
+    let states = decode_all(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame.op {
+            Some(proto::frame::Op::SetTextControlState(state)) => Some(state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(states.len(), 1);
+    let state = &states[0];
+    assert_eq!(state.value, "A💡B");
+    assert_eq!((state.selection_start, state.selection_end), (1, 3));
+    assert_eq!(state.direction, proto::SelectionDirection::Backward as i32);
 }
 
 #[test]

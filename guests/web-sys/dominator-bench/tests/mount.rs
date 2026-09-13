@@ -113,6 +113,7 @@ fn create_1k_emits_a_thousand_rows_with_the_shared_label_sequence() {
             family: Some(proto::event_payload::Family::Mouse(
                 proto::MouseData::default()
             )),
+            text_control: None,
         },
         Rc::new(Verdict::default()),
     ));

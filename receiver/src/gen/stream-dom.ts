@@ -3,6 +3,7 @@
 
 /* eslint-disable */
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
+import { SelectionDirection } from "./stream-dom-events.ts";
 
 export const protobufPackage = "polymorph.stream_dom";
 
@@ -58,6 +59,7 @@ export interface Frame {
     | { $case: "registerTemplate"; value: RegisterTemplate }
     | { $case: "insertAfter"; value: InsertAfter }
     | { $case: "bindMarker"; value: BindMarker }
+    | { $case: "setTextControlState"; value: SetTextControlState }
     | undefined;
   _unknownFields?: { [key: number]: Uint8Array[] } | undefined;
 }
@@ -159,6 +161,20 @@ export interface SetProperty {
     $case: "boolean";
     value: boolean;
   } | undefined;
+  _unknownFields?: { [key: number]: Uint8Array[] } | undefined;
+}
+
+/**
+ * Replace a textarea or text-like input's value and selection as one receiver
+ * operation. Offsets are DOM UTF-16 code units. Unsupported controls or
+ * invalid ranges make the operation a no-op.
+ */
+export interface SetTextControlState {
+  id: number;
+  value: string;
+  selectionStart: number;
+  selectionEnd: number;
+  direction: SelectionDirection;
   _unknownFields?: { [key: number]: Uint8Array[] } | undefined;
 }
 
@@ -334,6 +350,9 @@ export const Frame: MessageFns<Frame> = {
       case "bindMarker":
         BindMarker.encode(message.op.value, writer.uint32(138).fork()).join();
         break;
+      case "setTextControlState":
+        SetTextControlState.encode(message.op.value, writer.uint32(146).fork()).join();
+        break;
     }
     if (message._unknownFields !== undefined) {
       for (const [key, values] of globalThis.Object.entries(message._unknownFields)) {
@@ -493,6 +512,14 @@ export const Frame: MessageFns<Frame> = {
             }
 
             message.op = { $case: "bindMarker", value: BindMarker.decode(reader, reader.uint32()) };
+            continue;
+          }
+          case 18: {
+            if (tag !== 146) {
+              break;
+            }
+
+            message.op = { $case: "setTextControlState", value: SetTextControlState.decode(reader, reader.uint32()) };
             continue;
           }
         }
@@ -1315,6 +1342,112 @@ export const SetProperty: MessageFns<SetProperty> = {
             }
 
             message.value = { $case: "boolean", value: reader.bool() };
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        const buf = reader.skip(tag & 7);
+
+        const list = message._unknownFields![tag];
+
+        if (list === undefined) {
+          message._unknownFields![tag] = [buf];
+        } else {
+          list.push(buf);
+        }
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+};
+
+function createBaseSetTextControlState(): SetTextControlState {
+  return { id: 0, value: "", selectionStart: 0, selectionEnd: 0, direction: 0, _unknownFields: {} };
+}
+
+export const SetTextControlState: MessageFns<SetTextControlState> = {
+  encode(message: SetTextControlState, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== 0) {
+      writer.uint32(8).uint32(message.id);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    if (message.selectionStart !== 0) {
+      writer.uint32(24).uint32(message.selectionStart);
+    }
+    if (message.selectionEnd !== 0) {
+      writer.uint32(32).uint32(message.selectionEnd);
+    }
+    if (message.direction !== 0) {
+      writer.uint32(40).int32(message.direction);
+    }
+    if (message._unknownFields !== undefined) {
+      for (const [key, values] of globalThis.Object.entries(message._unknownFields)) {
+        const tag = parseInt(key, 10);
+        for (const value of values) {
+          writer.uint32(tag).raw(value);
+        }
+      }
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetTextControlState {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseSetTextControlState();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.id = reader.uint32();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.value = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.selectionStart = reader.uint32();
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.selectionEnd = reader.uint32();
+            continue;
+          }
+          case 5: {
+            if (tag !== 40) {
+              break;
+            }
+
+            message.direction = reader.int32() as any;
             continue;
           }
         }

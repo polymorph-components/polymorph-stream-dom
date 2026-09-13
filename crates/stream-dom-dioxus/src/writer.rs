@@ -550,6 +550,32 @@ impl WriteMutations for MutationWriter {
     ) {
         let nid = self.node(id);
 
+        if name == "text_control_state" {
+            if let AttributeValue::Any(value) = value {
+                if let Some(state) = value.as_any().downcast_ref::<crate::TextControlState>() {
+                    let direction = match state.direction {
+                        crate::TextControlSelectionDirection::None => {
+                            proto::SelectionDirection::None
+                        }
+                        crate::TextControlSelectionDirection::Forward => {
+                            proto::SelectionDirection::Forward
+                        }
+                        crate::TextControlSelectionDirection::Backward => {
+                            proto::SelectionDirection::Backward
+                        }
+                    };
+                    self.batch.set_text_control_state(
+                        nid,
+                        state.value.clone(),
+                        state.selection_start,
+                        state.selection_end,
+                        direction,
+                    );
+                }
+            }
+            return;
+        }
+
         // This table is dioxus-web's attribute-vs-property policy in
         // miniature (docs/design.md "`set-attribute` and `set-property` are
         // distinct": the producer decides, using the table its framework

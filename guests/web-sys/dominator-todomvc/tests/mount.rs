@@ -243,6 +243,7 @@ fn form(value: &str) -> proto::EventPayload {
             checked: None,
             fields: Vec::new(),
         })),
+        text_control: None,
     }
 }
 
@@ -254,6 +255,7 @@ fn keyboard(key: &str) -> proto::EventPayload {
                 ..Default::default()
             },
         )),
+        text_control: None,
     }
 }
 
@@ -308,6 +310,7 @@ fn a_hashchange_on_window_moves_the_selected_filter() {
                     href: "http://localhost/#/completed".to_string(),
                 },
             )),
+            text_control: None,
         },
         Rc::new(Verdict::default()),
     ));

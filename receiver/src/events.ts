@@ -4,13 +4,15 @@
 // only decides which family an event name belongs to and which DOM
 // properties fill it. Only the families this bring-up receiver's mount
 // layer wires up are implemented (docs/design.md "Events": the family the
-// receiver chooses by event name) — mouse, keyboard, form, navigation.
+// receiver chooses by event name) — mouse, keyboard, form, composition,
+// navigation, plus text-control context shared by input and selection events.
 // Every other name gets the empty payload (`EventPayload` with no `family`
 // case set), which is legal per the proto's header comment ("No case set
 // is the empty payload — focus, selection, ... the event name ... already
 // says everything those carry").
 
 import {
+  type CompositionData,
   EventPayload,
   type FormData as FormDataMessage,
   type FormField,
@@ -18,6 +20,8 @@ import {
   type Modifiers,
   type MouseData,
   type NavigationData,
+  SelectionDirection,
+  type TextControlData,
 } from "./gen/stream-dom-events.ts";
 
 // `MouseData.related_target` (16) is not populated: mapping a native
@@ -62,6 +66,11 @@ const FORM_EVENTS = new Set([
   "invalid",
   "reset",
 ]);
+const COMPOSITION_EVENTS = new Set([
+  "compositionstart",
+  "compositionupdate",
+  "compositionend",
+]);
 
 /** `window` listeners only (docs/design.md "Global listeners": "the only
  * reason to listen to either is to learn where the document now is").
@@ -70,12 +79,51 @@ const FORM_EVENTS = new Set([
  * `document` still gets a sensible payload. */
 const NAVIGATION_EVENTS = new Set(["hashchange", "popstate"]);
 
-export type Family = "mouse" | "keyboard" | "form" | "navigation" | "none";
+interface TextControlLike {
+  value?: unknown;
+  selectionStart?: unknown;
+  selectionEnd?: unknown;
+  selectionDirection?: unknown;
+}
+
+function textControlData(
+  ev: Event,
+  isComposing: boolean,
+  eventTarget: EventTarget | null = ev.target,
+): TextControlData | undefined {
+  const target = eventTarget as (EventTarget & TextControlLike) | null;
+  if (
+    typeof target?.value !== "string" ||
+    typeof target.selectionStart !== "number" ||
+    typeof target.selectionEnd !== "number"
+  ) return undefined;
+  const direction = target.selectionDirection === "forward"
+    ? SelectionDirection.SELECTION_DIRECTION_FORWARD
+    : target.selectionDirection === "backward"
+    ? SelectionDirection.SELECTION_DIRECTION_BACKWARD
+    : SelectionDirection.SELECTION_DIRECTION_NONE;
+  return {
+    value: target.value,
+    selectionStart: target.selectionStart,
+    selectionEnd: target.selectionEnd,
+    direction,
+    isComposing,
+  };
+}
+
+export type Family =
+  | "mouse"
+  | "keyboard"
+  | "form"
+  | "composition"
+  | "navigation"
+  | "none";
 
 export function familyFor(name: string): Family {
   if (MOUSE_EVENTS.has(name)) return "mouse";
   if (KEYBOARD_EVENTS.has(name)) return "keyboard";
   if (FORM_EVENTS.has(name)) return "form";
+  if (COMPOSITION_EVENTS.has(name)) return "composition";
   if (NAVIGATION_EVENTS.has(name)) return "navigation";
   return "none";
 }
@@ -123,6 +171,10 @@ function keyboardData(ev: KeyboardEvent): KeyboardData {
     isComposing: ev.isComposing === true,
     modifiers: modifiers(ev),
   };
+}
+
+function compositionData(ev: CompositionEvent): CompositionData {
+  return { data: ev.data ?? "" };
 }
 
 interface FormControlLike {
@@ -173,11 +225,16 @@ function navigationData(): NavigationData {
 }
 
 /** Encode `ev` as an `EventPayload` for `name`'s family. Names outside
- * mouse/keyboard/form/navigation (including focus/blur and every family
+ * mouse/keyboard/form/composition/navigation (including focus/blur and every family
  * this receiver does not yet implement) get the empty payload — zero
  * bytes, which is a valid `EventPayload` with no `family` case (proto3
  * default). */
-export function encodePayload(name: string, ev: Event): Uint8Array {
+export function encodePayload(
+  name: string,
+  ev: Event,
+  isComposing = (ev as InputEvent).isComposing === true,
+  eventTarget: EventTarget | null = ev.target,
+): Uint8Array {
   const family = familyFor(name);
   let payload: EventPayload;
   if (family === "mouse") {
@@ -190,6 +247,13 @@ export function encodePayload(name: string, ev: Event): Uint8Array {
     };
   } else if (family === "form") {
     payload = { family: { $case: "form", value: formData(name, ev) } };
+  } else if (family === "composition") {
+    payload = {
+      family: {
+        $case: "composition",
+        value: compositionData(ev as CompositionEvent),
+      },
+    };
   } else if (family === "navigation") {
     payload = {
       family: { $case: "navigation", value: navigationData() },
@@ -197,5 +261,6 @@ export function encodePayload(name: string, ev: Event): Uint8Array {
   } else {
     payload = { family: undefined };
   }
+  payload.textControl = textControlData(ev, isComposing, eventTarget);
   return EventPayload.encode(payload).finish();
 }

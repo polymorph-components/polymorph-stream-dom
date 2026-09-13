@@ -540,7 +540,11 @@ key, coordinates, form data on submit, `relatedTarget` as an id). The
 same bytes cross the worker and network tiers, so there is one definition
 of every family and no in-process/remote split. A `list<u8>` here is fine
 where a `list` per batch was not: one small message per call, not a
-batch. Files and drag data are resources, not copies. Three families are
+batch. Text controls additionally carry their value, UTF-16 selection
+endpoints, direction and composition state as optional context shared by
+input and selection events. Restoration is one `set-text-control-state`
+mutation so assigning the value and range cannot expose partial state.
+Files and drag data are resources, not copies. Three families are
 synthesized by the receiver rather than taken from DOM events: `resize`
 and `visible` from observers, and `frame` from `requestAnimationFrame` —
 a producer has no rAF of its own, and anything that animates needs the

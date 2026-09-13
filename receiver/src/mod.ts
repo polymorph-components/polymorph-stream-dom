@@ -10,6 +10,7 @@ export type {
   TemplateAttr,
   TemplateElement,
   TemplateNode,
+  TextControlState,
 } from "./frames.ts";
 export { ListenerRegistry } from "./receiver.ts";
 export type { Receiver } from "./receiver.ts";

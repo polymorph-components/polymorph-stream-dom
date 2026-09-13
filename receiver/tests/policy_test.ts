@@ -78,6 +78,7 @@ class RecordingSink implements FrameSink {
   setProperty(id: number, name: number, value: PropertyValue): void {
     this.calls.push({ op: "setProperty", id, name, value });
   }
+  setTextControlState(): void {}
   addListener(listener: Listener): void {
     this.calls.push({ op: "addListener", listener });
   }
@@ -185,6 +186,38 @@ Deno.test("strict decoder rejects an unknown sub-message field; open decoder ski
     () => new FrameDecoder(strict, { strict: true }).push(bytes),
     Error,
     `stream-dom: unknown field 9 in CreateElement (receiver PROTOCOL_VERSION ${PROTOCOL_VERSION})`,
+  );
+});
+
+Deno.test("strict decoder checks SetTextControlState fields", () => {
+  const body = new BinaryWriter();
+  body.uint32((18 << 3) | 2).fork()
+    .uint32((1 << 3) | 0).uint32(7)
+    .uint32((2 << 3) | 2).string("abc")
+    .uint32((6 << 3) | 0).uint32(1)
+    .join();
+  const bytes = frame(body.finish());
+  new FrameDecoder(new RecordingSink()).push(bytes);
+  assertThrows(
+    () => new FrameDecoder(new RecordingSink(), { strict: true }).push(bytes),
+    Error,
+    `stream-dom: unknown field 6 in SetTextControlState (receiver PROTOCOL_VERSION ${PROTOCOL_VERSION})`,
+  );
+});
+
+Deno.test("strict decoder rejects an unknown text-control selection direction", () => {
+  const body = new BinaryWriter();
+  body.uint32((18 << 3) | 2).fork()
+    .uint32((1 << 3) | 0).uint32(7)
+    .uint32((2 << 3) | 2).string("abc")
+    .uint32((5 << 3) | 0).int32(99)
+    .join();
+  const bytes = frame(body.finish());
+  new FrameDecoder(new RecordingSink()).push(bytes);
+  assertThrows(
+    () => new FrameDecoder(new RecordingSink(), { strict: true }).push(bytes),
+    Error,
+    "stream-dom: SetTextControlState.direction unknown value 99",
   );
 });
 
