@@ -316,6 +316,7 @@ fn form_payload(value: &str, checked: Option<bool>) -> proto::EventPayload {
             checked,
             fields: Vec::new(),
         })),
+        text_control: None,
     }
 }
 
@@ -327,6 +328,7 @@ fn key_payload(key: &str) -> proto::EventPayload {
                 ..Default::default()
             },
         )),
+        text_control: None,
     }
 }
 
@@ -335,6 +337,7 @@ fn mouse_payload() -> proto::EventPayload {
         family: Some(proto::event_payload::Family::Mouse(
             proto::MouseData::default(),
         )),
+        text_control: None,
     }
 }
 
@@ -609,6 +612,7 @@ fn navigation_payload(href: &str) -> proto::EventPayload {
                 href: href.to_string(),
             },
         )),
+        text_control: None,
     }
 }
 

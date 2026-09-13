@@ -226,6 +226,7 @@ fn form_payload(value: &str) -> Vec<u8> {
             value: value.to_string(),
             ..Default::default()
         })),
+        text_control: None,
     }
     .encode_to_vec()
 }
@@ -240,6 +241,7 @@ fn enter_payload() -> Vec<u8> {
                 ..Default::default()
             },
         )),
+        text_control: None,
     }
     .encode_to_vec()
 }
