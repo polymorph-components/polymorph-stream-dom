@@ -54,8 +54,16 @@ async function run(): Promise<void> {
 
   const receiver = queryParam("receiver", ["native", "remote"] as const);
   const transport = queryParam("transport", ["direct", "chunked"] as const);
+  const jspi = queryParam("jspi", ["true", "false"] as const);
 
-  await mount({ source, root, onError: showError, receiver, transport });
+  await mount({
+    source,
+    root,
+    onError: showError,
+    receiver,
+    transport,
+    jspi: jspi === undefined ? undefined : jspi === "true",
+  });
   globalThis.__streamDom!.mounted = true;
 }
 

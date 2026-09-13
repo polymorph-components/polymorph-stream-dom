@@ -1,12 +1,12 @@
-// Serialization of host->guest `handle-event` entries.
+// Reentrancy guard for host->guest `handle-event` entries.
 //
 // The host may only enter the guest component instance when no guest
 // activation is live. There are THREE windows in which a naive, synchronous
 // dispatch from a DOM listener would violate that, and all three are
 // reachable from ordinary app code:
 //
-//   1. A `handle-event` call is in flight. The guest's own synchronous DOM
-//      mutations (issued mid-call, before the call's promise settles — e.g.
+//   1. A `handle-event` entry is synchronously active. The guest's own DOM
+//      mutations (issued before the export parks or returns — e.g.
 //      `replaceWith`ing a focused `<input>` out of the DOM) make the browser
 //      fire a SECOND, synchronous native event (`focusout`/`blur`) while the
 //      first entry is still on the stack. Entering the instance again there
@@ -19,12 +19,9 @@
 //      (mount.ts's `stream.readDirect` callback resumption), and DOM
 //      application happens synchronously INSIDE that resumption, i.e.
 //      inside the guest's stream-write rendezvous. A live guest activation
-//      is on the stack: the instance's reentrance bracket is turn-scoped,
-//      taken around every thread resumption and released only when the
-//      thread parks (.deps/polyengine/runtime/src/task/thread.ts `resumeWith`, and
-//      exec/boundary.ts's matching bracket). So a native event fired by the
-//      mutation itself would enter the guest from inside a live turn — the
-//      same trap, with nothing "in flight" by the window-1 bookkeeping.
+//      is on the stack. So a native event fired by the mutation itself would
+//      enter the guest from inside a live turn — the same trap, with no
+//      `handle-event` entry active.
 //
 //   3. A host IMPORT invoked by the guest. `queries.set-focus`
 //      (wit/stream-dom.wit, `interface queries`) runs host code while the
@@ -46,26 +43,31 @@
 // what the gate's bracket around the whole callback prevents.
 //
 // Why deferring to a microtask is sound: microtasks run only when the JS
-// stack is empty, and a guest turn holds the stack until it parks or
-// completes. Since the reentrance bracket is turn-scoped, an empty stack
-// implies no live turn, hence an enterable instance. A drain deferred with
-// `queueMicrotask` therefore always runs in a legal window — no polling, no
-// timers, and it lands at the earliest legal moment.
+// stack is empty, after the synchronous guest entry or direct-memory callback
+// that caused the nested dispatch has returned. A drain deferred with
+// `queueMicrotask` therefore runs outside that reentrant stack — no polling,
+// no timers, and it lands at the earliest legal moment.
+//
+// A returned Promise is deliberately NOT a guard. In the plain callback
+// runtime, an export's synchronous activation has parked before the call
+// returns; JSPI supplies its own entry scheduling. Waiting for settlement
+// needlessly delays newer browser input behind unrelated async work.
+// Rejections are still observed.
 //
 // Caveat: `preventDefault` semantics are lost for DEFERRED dispatches. The
 // browser has already decided whether to honor the default by the time the
 // queued entry runs. This is inherent to any deferral (it was already true
-// of the pre-existing in-flight queue), and the events that actually
-// trigger deferral are focusout-class events with no meaningful default.
-// The idle path stays synchronous precisely to keep `preventDefault`
-// working for the common case, where the dispatch happens inside the
-// native listener's own frame.
+// of the pre-existing in-flight queue). Declarative listener flags remain the
+// answer for events that may be raised reentrantly or more than once in one JS
+// task. The idle path stays synchronous precisely to keep `preventDefault`
+// working for the common case, where the dispatch happens inside the native
+// listener's own frame.
 
 /**
- * Serializes guest entries so that at most one is live and none is attempted
- * inside a forbidden window (see the module comment: in-flight call,
- * mutation application inside the read loop's resumption, or a host import
- * running inside the calling guest's turn).
+ * Prevents a guest entry inside a forbidden synchronous window (see the
+ * module comment: another entry's synchronous extent, mutation application
+ * inside the read loop's resumption, or a host import running inside the
+ * calling guest's turn).
  *
  * Pure logic — no DOM, no runtime imports — so the ordering rules can be
  * unit-tested directly. The host wraps mutation application AND the bodies
@@ -73,16 +75,18 @@
  * event through `dispatch`.
  */
 export class DispatchGate {
-  /** A guest `handle-event` call is in flight (its promise is unsettled). */
-  #busy = false;
+  /** A guest `handle-event` call has not yet returned to this host frame. */
+  #entering = false;
   /** Inside a host-code window that runs within a live guest turn: the
    * mutation read session's chunk-application window (mount.ts's
    * `beginApply`/`endApply` around `stream.readDirect`'s callback), or the
    * body of a host import the guest called. */
-  #applying = false;
+  #applyDepth = 0;
   #disposed = false;
   /** Captured guest-entry thunks, drained FIFO. */
   #pending: Array<() => unknown> = [];
+  #draining = false;
+  #drainScheduled = false;
   #onError: (err: unknown) => void;
 
   constructor(onError: (err: unknown) => void) {
@@ -91,7 +95,7 @@ export class DispatchGate {
 
   /** Enter the mutation-application window: dispatches now queue. */
   beginApply(): void {
-    this.#applying = true;
+    this.#applyDepth++;
   }
 
   /** Leave the mutation-application window and drain what it collected.
@@ -103,8 +107,13 @@ export class DispatchGate {
    * proxy for "no live guest turn" (module comment). The same holds for a
    * host import's `finally`: it runs inside the caller's turn. */
   endApply(): void {
-    this.#applying = false;
-    if (this.#pending.length > 0) queueMicrotask(() => this.#drain());
+    if (this.#applyDepth === 0) {
+      throw new Error("DispatchGate.endApply without matching beginApply");
+    }
+    this.#applyDepth--;
+    if (this.#applyDepth === 0 && this.#pending.length > 0) {
+      this.#scheduleDrain();
+    }
   }
 
   /** Drop every queued entry and refuse further dispatches. */
@@ -118,8 +127,11 @@ export class DispatchGate {
    * later, when the native event object may already be stale. */
   dispatch(call: () => unknown): void {
     if (this.#disposed) return;
-    if (this.#busy || this.#applying) {
-      this.#pending.push(() => this.#enter(call));
+    if (
+      this.#entering || this.#applyDepth > 0 || this.#draining ||
+      this.#pending.length > 0 || this.#drainScheduled
+    ) {
+      this.#pending.push(call);
       return;
     }
     // Idle: enter synchronously, so a `preventDefault()` made by the guest
@@ -132,26 +144,26 @@ export class DispatchGate {
     // but it documents the invariant: nothing enters the guest after
     // disposal.
     if (this.#disposed) return;
-    this.#busy = true;
-    let p: Promise<unknown>;
+    this.#entering = true;
+    let result: unknown;
     try {
-      // Export calls are uniformly Promise-shaped (embedder-api.md
-      // "Functions and async"), but a SYNCHRONOUS throw is still possible
-      // (argument lowering failure, already-trapped instance). Previously
-      // that wedged the queue forever, since the in-flight flag was set and
-      // no `finally` ever ran. Reset, route the error, keep draining.
-      p = Promise.resolve(call());
+      result = call();
     } catch (err) {
-      this.#busy = false;
       this.#onError(err);
-      queueMicrotask(() => this.#drain());
-      return;
+    } finally {
+      this.#entering = false;
     }
-    // Fire-and-forget from the listener's perspective — the guest's own
-    // re-render flows through the mutation channel independently — but a
-    // rejection must not become an unhandled rejection.
-    p.catch(this.#onError).finally(() => {
-      this.#busy = false;
+    // Fire-and-forget from the listener's perspective. Promise settlement is
+    // outside the protected synchronous turn; observe only rejection.
+    void Promise.resolve(result).catch(this.#onError);
+    if (this.#pending.length > 0) this.#scheduleDrain();
+  }
+
+  #scheduleDrain(): void {
+    if (this.#drainScheduled || this.#draining || this.#disposed) return;
+    this.#drainScheduled = true;
+    queueMicrotask(() => {
+      this.#drainScheduled = false;
       this.#drain();
     });
   }
@@ -161,12 +173,25 @@ export class DispatchGate {
       this.#pending.length = 0;
       return;
     }
-    // Still in a forbidden window: whichever window closes last continues
-    // the chain (the in-flight call's `finally`, or the next `endApply`).
-    if (this.#busy || this.#applying) return;
-    const next = this.#pending.shift();
-    // Exactly one entry: `#enter` sets `#busy`, and its settle chain drains
-    // the remainder in FIFO order.
-    if (next) next();
+    if (this.#entering || this.#applyDepth > 0 || this.#draining) return;
+    this.#draining = true;
+    try {
+      // Deliberately drain to quiescence in this microtask. A handler may
+      // synchronously append another event; FIFO puts it behind events already
+      // queued. There is no arbitrary fairness budget in this first-spike
+      // receiver: native event dispatch is finite, and an endless self-feeding
+      // producer is already an endless synchronous workload.
+      while (
+        !this.#disposed && this.#applyDepth === 0 &&
+        this.#pending.length > 0
+      ) {
+        this.#enter(this.#pending.shift()!);
+      }
+    } finally {
+      this.#draining = false;
+    }
+    if (this.#pending.length > 0 && this.#applyDepth === 0) {
+      this.#scheduleDrain();
+    }
   }
 }
